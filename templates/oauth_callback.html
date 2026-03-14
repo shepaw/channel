@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>OAuth 回调 - Channel Service</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+</head>
+<body class="bg-gray-900 text-white min-h-screen flex items-center justify-center">
+    <div id="loading" class="text-center">
+        <div class="animate-spin rounded-full h-12 w-12 border-4 border-blue-500 border-t-transparent mx-auto mb-4"></div>
+        <p class="text-gray-400">正在处理登录，请稍候...</p>
+    </div>
+    <div id="error" class="hidden text-center">
+        <p class="text-red-400 mb-4">登录失败，请重试</p>
+        <a href="/login" class="text-blue-400 hover:underline">返回登录</a>
+    </div>
+    <script>
+        // 从URL中获取token并存储
+        const params = new URLSearchParams(window.location.search);
+        const token = params.get('token');
+        if (token) {
+            localStorage.setItem('access_token', token);
+            window.location.href = '/dashboard';
+        } else {
+            document.getElementById('loading').classList.add('hidden');
+            document.getElementById('error').classList.remove('hidden');
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+version: "3.9"
+
+services:
+  channel:
+    build: .
+    ports:
+      - "8080:8080"
+      - "10000-10100:10000-10100"   # TCP/UDP 代理端口段（按需扩大）
+    environment:
+      PORT: 8080
+      BASE_URL: http://localhost:8080
+      BASE_DOMAIN: localhost:8080
+      DATABASE_URL: sqlite:./data/channel.db
+      REDIS_ADDR: redis:6379
+      TOKEN_TTL: 15m
+      MAX_CHANNELS: 5
+      TCP_PORT_RANGE_START: 10000
+      TCP_PORT_RANGE_END: 10100
+      # OAuth（填入真实值）
+      # WECHAT_APP_ID: ...
+      # WECHAT_APP_SECRET: ...
+      # GOOGLE_CLIENT_ID: ...
+      # GOOGLE_CLIENT_SECRET: ...
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped

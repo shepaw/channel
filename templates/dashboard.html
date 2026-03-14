@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Channel Service - 控制台</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6/css/all.min.css" rel="stylesheet">
+    <style>
+        .sidebar { width: 260px; min-height: 100vh; }
+        .main-content { margin-left: 260px; }
+        @media (max-width: 768px) {
+            .sidebar { width: 100%; min-height: auto; }
+            .main-content { margin-left: 0; }
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <!-- 侧边栏 -->
+    <div class="sidebar bg-gray-900 text-white fixed top-0 left-0 flex flex-col">
+        <div class="p-6 border-b border-gray-700">
+            <h1 class="text-xl font-bold">Channel Service</h1>
+            <p class="text-gray-400 text-sm mt-1">应用通信代理</p>
+        </div>
+
+        <nav class="flex-1 p-4">
+            <a href="#" onclick="showSection('channels')" 
+               class="nav-item flex items-center py-2 px-3 rounded text-gray-300 hover:bg-gray-700 mb-1 active-nav">
+                <i class="fas fa-network-wired mr-3 w-5"></i> Channel 管理
+            </a>
+            <a href="#" onclick="showSection('tokens')"
+               class="nav-item flex items-center py-2 px-3 rounded text-gray-300 hover:bg-gray-700 mb-1">
+                <i class="fas fa-key mr-3 w-5"></i> Access Token
+            </a>
+            <a href="#" onclick="showSection('docs')"
+               class="nav-item flex items-center py-2 px-3 rounded text-gray-300 hover:bg-gray-700 mb-1">
+                <i class="fas fa-book mr-3 w-5"></i> 接入文档
+            </a>
+        </nav>
+
+        <!-- 用户信息 -->
+        <div class="p-4 border-t border-gray-700">
+            <div class="flex items-center">
+                <img id="user-avatar" src="https://via.placeholder.com/36" class="w-9 h-9 rounded-full mr-3" alt="Avatar">
+                <div class="flex-1 min-w-0">
+                    <p id="user-name" class="text-sm font-medium text-white truncate">加载中...</p>
+                    <p id="user-email" class="text-xs text-gray-400 truncate"></p>
+                </div>
+                <button onclick="logout()" class="text-gray-400 hover:text-white ml-2" title="退出">
+                    <i class="fas fa-sign-out-alt"></i>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 主内容区 -->
+    <div class="main-content">
+        <div class="p-8">
+
+            <!-- Channels 管理 -->
+            <div id="section-channels">
+                <div class="flex justify-between items-center mb-6">
+                    <div>
+                        <h2 class="text-2xl font-bold text-gray-800">Channel 管理</h2>
+                        <p class="text-gray-500 text-sm mt-1">每个账号最多创建 <span id="max-channels">5</span> 个 Channel</p>
+                    </div>
+                    <button onclick="openCreateModal()" 
+                        class="bg-blue-600 text-white py-2 px-5 rounded-lg hover:bg-blue-700 flex items-center">
+                        <i class="fas fa-plus mr-2"></i> 创建 Channel
+                    </button>
+                </div>
+
+                <!-- 统计概览 -->
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                    <div class="bg-white rounded-xl p-5 shadow-sm">
+                        <p class="text-sm text-gray-500">已使用 Channels</p>
+                        <p class="text-2xl font-bold text-gray-800 mt-1"><span id="channels-used">0</span> / <span id="channels-max">5</span></p>
+                    </div>
+                    <div class="bg-white rounded-xl p-5 shadow-sm">
+                        <p class="text-sm text-gray-500">活跃连接总数</p>
+                        <p class="text-2xl font-bold text-blue-600 mt-1" id="total-connections">0</p>
+                    </div>
+                    <div class="bg-white rounded-xl p-5 shadow-sm">
+                        <p class="text-sm text-gray-500">今日总流量</p>
+                        <p class="text-2xl font-bold text-green-600 mt-1" id="total-traffic">0 MB</p>
+                    </div>
+                </div>
+
+                <!-- Channels 列表 -->
+                <div id="channels-list" class="grid gap-4">
+                    <!-- Channel cards will be rendered here -->
+                </div>
+
+                <!-- 空状态 -->
+                <div id="empty-state" class="hidden text-center py-16">
+                    <i class="fas fa-network-wired text-4xl text-gray-300 mb-4"></i>
+                    <p class="text-gray-500">还没有 Channel，点击"创建 Channel"开始</p>
+                </div>
+            </div>
+
+            <!-- Access Token 管理 -->
+            <div id="section-tokens" class="hidden">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-2xl font-bold text-gray-800">Access Token</h2>
+                    <button onclick="generateToken()"
+                        class="bg-blue-600 text-white py-2 px-5 rounded-lg hover:bg-blue-700 flex items-center">
+                        <i class="fas fa-key mr-2"></i> 生成 Token
+                    </button>
+                </div>
+
+                <div class="bg-white rounded-xl shadow-sm p-6 mb-4">
+                    <h3 class="font-semibold text-gray-800 mb-4">生成新 Token</h3>
+                    <div class="flex items-center gap-4">
+                        <div>
+                            <label class="text-sm text-gray-600 block mb-1">有效时长</label>
+                            <select id="token-ttl" class="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+                                <option value="15m">15 分钟 (默认)</option>
+                                <option value="1h">1 小时</option>
+                                <option value="6h">6 小时</option>
+                                <option value="24h">24 小时</option>
+                                <option value="168h">7 天</option>
+                            </select>
+                        </div>
+                        <div class="mt-4">
+                            <button onclick="generateToken()" class="bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 text-sm">
+                                生成
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- 生成的Token -->
+                    <div id="generated-token" class="hidden mt-4 p-4 bg-gray-50 rounded-lg">
+                        <p class="text-sm text-gray-600 mb-2">您的 Access Token（仅显示一次）：</p>
+                        <div class="flex items-center gap-2">
+                            <code id="token-value" class="flex-1 text-sm bg-white border border-gray-200 p-2 rounded break-all"></code>
+                            <button onclick="copyToken()" class="bg-gray-200 hover:bg-gray-300 p-2 rounded" title="复制">
+                                <i class="fas fa-copy text-gray-600"></i>
+                            </button>
+                        </div>
+                        <p id="token-expires" class="text-xs text-gray-400 mt-2"></p>
+                        <p class="text-yellow-600 text-xs mt-1"><i class="fas fa-exclamation-triangle mr-1"></i>请安全保存此 Token，关闭后无法再次查看</p>
+                    </div>
+                </div>
+
+                <div class="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                    <p class="text-blue-800 text-sm">
+                        <i class="fas fa-info-circle mr-2"></i>
+                        <strong>使用方式：</strong>注册 Channel 时，在请求 Header 中携带 
+                        <code class="bg-blue-100 px-1 rounded">Authorization: Bearer &lt;token&gt;</code>
+                    </p>
+                </div>
+            </div>
+
+            <!-- 接入文档 -->
+            <div id="section-docs" class="hidden">
+                <h2 class="text-2xl font-bold text-gray-800 mb-6">接入文档</h2>
+                <div class="bg-white rounded-xl shadow-sm p-6 prose max-w-none">
+                    <h3 class="text-lg font-semibold">1. 获取 Access Token</h3>
+                    <p class="text-gray-600 text-sm">在 "Access Token" 页面生成临时 Token（默认有效期 15 分钟）。</p>
+
+                    <h3 class="text-lg font-semibold mt-6">2. 注册 Channel</h3>
+                    <pre class="bg-gray-900 text-green-400 p-4 rounded-lg text-sm overflow-x-auto"><code>POST /api/v1/channels
+Authorization: Bearer &lt;your_token&gt;
+Content-Type: application/json
+
+{
+  "name": "My App Channel",
+  "type": "http",          // http | https | ws | tcp | udp
+  "target": "http://localhost:3000",
+  "description": "My application"
+}</code></pre>
+
+                    <h4 class="text-sm font-semibold mt-3">返回值示例：</h4>
+                    <pre class="bg-gray-900 text-green-400 p-4 rounded-lg text-sm overflow-x-auto"><code>{
+  "id": "3f8a2b1c-...",
+  "name": "My App Channel",
+  "type": "http",
+  "endpoint": "https://channel.example.com/proxy/3f8a2b1c-...",
+  "is_active": true
+}</code></pre>
+
+                    <h3 class="text-lg font-semibold mt-6">3. 通过 Channel 访问应用</h3>
+                    <pre class="bg-gray-900 text-green-400 p-4 rounded-lg text-sm overflow-x-auto"><code># HTTP/HTTPS 转发
+GET https://channel.example.com/proxy/{channel_id}/your/path
+
+# WebSocket 连接
+ws://channel.example.com/proxy/{channel_id}/ws
+
+# TCP/UDP (返回的endpoint中已包含端口信息)
+tcp://channel.example.com:{port}</code></pre>
+
+                    <h3 class="text-lg font-semibold mt-6">4. 设置限流规则</h3>
+                    <pre class="bg-gray-900 text-green-400 p-4 rounded-lg text-sm overflow-x-auto"><code>POST /api/v1/channels/{id}/rate-limits
+Authorization: Bearer &lt;your_token&gt;
+
+// 带宽限制（单位 Mbps）
+{"rule_type": "bandwidth", "limit_value": 10, "time_window": "1s"}
+
+// 并发连接数限制
+{"rule_type": "connections", "limit_value": 100, "time_window": "1m"}
+
+// 请求频率限制（次/秒）
+{"rule_type": "requests", "limit_value": 100, "time_window": "1s"}</code></pre>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- 创建 Channel 弹窗 -->
+    <div id="create-modal" class="hidden fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+        <div class="bg-white rounded-xl p-6 max-w-lg w-full mx-4 shadow-xl">
+            <div class="flex justify-between items-center mb-5">
+                <h3 class="text-lg font-semibold text-gray-800">创建 Channel</h3>
+                <button onclick="closeCreateModal()" class="text-gray-400 hover:text-gray-600">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
+            </div>
+
+            <form id="create-form" onsubmit="submitCreateChannel(event)">
+                <div class="space-y-4">
+                    <div>
+                        <label class="text-sm font-medium text-gray-700 block mb-1">名称 *</label>
+                        <input type="text" id="channel-name" required maxlength="100"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="例：My App Channel">
+                    </div>
+
+                    <div>
+                        <label class="text-sm font-medium text-gray-700 block mb-1">协议类型 *</label>
+                        <select id="channel-type" required
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                            onchange="onTypeChange(this.value)">
+                            <option value="http">HTTP（反向代理）</option>
+                            <option value="https">HTTPS（反向代理）</option>
+                            <option value="ws">WebSocket（反向代理）</option>
+                            <option value="tcp">TCP（反向代理）</option>
+                            <option value="udp">UDP（反向代理）</option>
+                            <option value="tunnel-http">tunnel-http（隧道模式 🔗）</option>
+                            <option value="tunnel-tcp">tunnel-tcp（隧道模式 🔗）</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label class="text-sm font-medium text-gray-700 block mb-1">目标地址 *</label>
+                        <input type="text" id="channel-target" required
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="例：http://localhost:3000">
+                    </div>
+
+                    <div>
+                        <label class="text-sm font-medium text-gray-700 block mb-1">描述</label>
+                        <textarea id="channel-description" rows="2"
+                            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="可选描述"></textarea>
+                    </div>
+
+                    <!-- 隧道模式提示（选择 tunnel-* 时显示） -->
+                    <div id="tunnel-tip" class="hidden bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
+                        <p class="font-medium mb-1">🔗 隧道模式说明</p>
+                        <p class="mb-2">创建后，在本地运行以下命令建立连接：</p>
+                        <code class="block bg-blue-100 p-2 rounded text-xs break-all">
+                            ./channel-agent --server <span id="tip-server">http://localhost:8080</span> --channel-id &lt;创建后获取&gt; --token &lt;your-token&gt; --target <span id="tip-target">http://localhost:3000</span>
+                        </code>
+                        <p class="mt-2 text-xs text-blue-600">外部流量将通过此隧道转发到你的本地应用，无需公网 IP。</p>
+                    </div>
+                </div>
+
+                <div class="flex justify-end gap-3 mt-6">
+                    <button type="button" onclick="closeCreateModal()"
+                        class="px-4 py-2 text-sm text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg">
+                        取消
+                    </button>
+                    <button type="submit"
+                        class="px-4 py-2 text-sm text-white bg-blue-600 hover:bg-blue-700 rounded-lg">
+                        创建
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- 限流规则弹窗 -->
+    <div id="ratelimit-modal" class="hidden fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+        <div class="bg-white rounded-xl p-6 max-w-lg w-full mx-4 shadow-xl">
+            <div class="flex justify-between items-center mb-5">
+                <h3 class="text-lg font-semibold text-gray-800">限流规则设置</h3>
+                <button onclick="closeRateLimitModal()" class="text-gray-400 hover:text-gray-600">
+                    <i class="fas fa-times text-xl"></i>
+                </button>
+            </div>
+
+            <div id="ratelimit-rules-list" class="mb-4 space-y-2 max-h-48 overflow-y-auto">
+                <p class="text-gray-400 text-sm text-center py-4">加载中...</p>
+            </div>
+
+            <div class="border-t border-gray-200 pt-4">
+                <h4 class="text-sm font-semibold text-gray-700 mb-3">添加新规则</h4>
+                <div class="grid grid-cols-3 gap-3 mb-3">
+                    <div>
+                        <label class="text-xs text-gray-600 block mb-1">类型</label>
+                        <select id="rl-type" class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+                            <option value="bandwidth">带宽 (Mbps)</option>
+                            <option value="connections">并发连接数</option>
+                            <option value="requests">请求速率 (rps)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="text-xs text-gray-600 block mb-1">限制值</label>
+                        <input type="number" id="rl-value" min="0" step="0.1"
+                            class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm" placeholder="如：10">
+                    </div>
+                    <div>
+                        <label class="text-xs text-gray-600 block mb-1">时间窗口</label>
+                        <select id="rl-window" class="w-full border border-gray-300 rounded px-2 py-1.5 text-sm">
+                            <option value="1s">1 秒</option>
+                            <option value="1m">1 分钟</option>
+                            <option value="1h">1 小时</option>
+                        </select>
+                    </div>
+                </div>
+                <button onclick="submitRateLimit()" class="w-full bg-blue-600 text-white py-2 rounded-lg text-sm hover:bg-blue-700">
+                    添加规则
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Secret 展示弹窗（仅在创建 tunnel channel 时出现） -->
+    <div id="secret-modal" class="hidden fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+        <div class="bg-white rounded-xl p-6 max-w-xl w-full mx-4 shadow-xl">
+            <div class="flex items-center gap-2 mb-4">
+                <span class="text-2xl">🔑</span>
+                <h3 class="text-lg font-semibold text-gray-800">Channel Secret — 请立即保存</h3>
+            </div>
+            <div class="bg-yellow-50 border border-yellow-300 rounded-lg p-3 mb-4 text-sm text-yellow-800">
+                <i class="fas fa-exclamation-triangle mr-1"></i>
+                此 Secret <strong>仅展示一次</strong>，关闭后无法再次查看。丢失后可在 Channel 设置中重新生成（旧连接立即失效）。
+            </div>
+            <div class="mb-4">
+                <label class="text-xs font-medium text-gray-500 block mb-1">Channel Secret</label>
+                <div class="flex items-center gap-2">
+                    <code id="secret-value" class="flex-1 text-sm bg-gray-100 border border-gray-200 px-3 py-2 rounded break-all font-mono"></code>
+                    <button onclick="copySecret()" class="bg-gray-200 hover:bg-gray-300 p-2 rounded flex-shrink-0" title="复制">
+                        <i class="fas fa-copy text-gray-600"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="mb-5">
+                <label class="text-xs font-medium text-gray-500 block mb-1">启动 Agent 命令</label>
+                <div class="relative">
+                    <pre id="setup-command" class="text-xs bg-gray-900 text-green-400 p-3 rounded overflow-x-auto whitespace-pre-wrap break-all"></pre>
+                    <button onclick="copySetupCommand()" class="absolute top-2 right-2 bg-gray-700 hover:bg-gray-600 text-gray-300 p-1.5 rounded text-xs">
+                        <i class="fas fa-copy"></i>
+                    </button>
+                </div>
+            </div>
+            <button onclick="closeSecretModal()" class="w-full bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 font-medium">
+                我已保存 Secret，关闭
+            </button>
+        </div>
+    </div>
+
+    <script>
+        let token = localStorage.getItem('access_token');
+        let channels = [];
+
+        // 初始化
+        async function init() {
+            if (!token) {
+                window.location.href = '/login';
+                return;
+            }
+            await loadChannels();
+        }
+
+        function showSection(name) {
+            document.querySelectorAll('[id^="section-"]').forEach(el => el.classList.add('hidden'));
+            document.getElementById('section-' + name).classList.remove('hidden');
+        }
+
+        async function loadChannels() {
+            try {
+                const resp = await fetch(`${API_BASE}/channels`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                
+                if (resp.status === 401) {
+                    window.location.href = '/login';
+                    return;
+                }
+
+                const data = await resp.json();
+                channels = data.channels || [];
+                renderChannels();
+                updateStats();
+            } catch (err) {
+                console.error('Failed to load channels:', err);
+            }
+        }
+
+        function renderChannels() {
+            const list = document.getElementById('channels-list');
+            const emptyState = document.getElementById('empty-state');
+
+            if (channels.length === 0) {
+                list.innerHTML = '';
+                emptyState.classList.remove('hidden');
+                return;
+            }
+
+            emptyState.classList.add('hidden');
+            list.innerHTML = channels.map(ch => `
+                <div class="bg-white rounded-xl shadow-sm p-5">
+                    <div class="flex justify-between items-start">
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="inline-block px-2 py-0.5 rounded text-xs font-medium ${typeColor(ch.type)}">${ch.type.toUpperCase()}</span>
+                                <h3 class="font-semibold text-gray-800">${escapeHtml(ch.name)}</h3>
+                                <span class="w-2 h-2 rounded-full ${ch.is_active ? 'bg-green-500' : 'bg-gray-300'}"></span>
+                                ${(ch.type === 'tunnel-http' || ch.type === 'tunnel-tcp') ? `
+                                <span id="tunnel-dot-${ch.id}" class="w-2 h-2 rounded-full bg-gray-300"></span>
+                                <span id="tunnel-label-${ch.id}" class="text-xs text-gray-400">检测中</span>
+                                ` : ''}
+                            </div>
+                            <p class="text-sm text-gray-500 mb-2">${escapeHtml(ch.description || '')}</p>
+                            <div class="flex items-center gap-2">
+                                <code class="text-xs bg-gray-100 px-2 py-1 rounded text-blue-700 break-all flex-1">${ch.endpoint}</code>
+                                <button onclick="copyEndpoint('${ch.endpoint}')" class="text-gray-400 hover:text-gray-600 flex-shrink-0" title="复制地址">
+                                    <i class="fas fa-copy text-sm"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="flex gap-2 ml-4">
+                            <button onclick="openRateLimitModal('${ch.id}')" class="text-gray-400 hover:text-blue-500" title="限流设置">
+                                <i class="fas fa-tachometer-alt"></i>
+                            </button>
+                            <button onclick="toggleChannel('${ch.id}', ${!ch.is_active})" class="text-gray-400 hover:text-yellow-500" title="${ch.is_active ? '禁用' : '启用'}">
+                                <i class="fas fa-${ch.is_active ? 'pause' : 'play'}"></i>
+                            </button>
+                            <button onclick="deleteChannel('${ch.id}', '${escapeHtml(ch.name)}')" class="text-gray-400 hover:text-red-500" title="删除">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="mt-3 pt-3 border-t border-gray-100 flex gap-6 text-xs text-gray-500">
+                        <span><i class="fas fa-exchange-alt mr-1"></i>${formatBytes(ch.stats?.today_bytes || 0)} 今日流量</span>
+                        <span><i class="fas fa-link mr-1"></i>${ch.stats?.active_connections || 0} 活跃连接</span>
+                        <span><i class="far fa-clock mr-1"></i>创建于 ${formatDate(ch.created_at)}</span>
+                    </div>
+                </div>
+            `).join('');
+
+            // 异步检测所有隧道 channel 的在线状态
+            channels
+                .filter(ch => ch.type === 'tunnel-http' || ch.type === 'tunnel-tcp')
+                .forEach(ch => checkTunnelStatus(ch.id));
+        }
+
+        function updateStats() {
+            document.getElementById('channels-used').textContent = channels.length;
+            
+            const totalConnections = channels.reduce((sum, c) => sum + (c.stats?.active_connections || 0), 0);
+            const totalBytes = channels.reduce((sum, c) => sum + (c.stats?.today_bytes || 0), 0);
+
+            document.getElementById('total-connections').textContent = totalConnections;
+            document.getElementById('total-traffic').textContent = formatBytes(totalBytes);
+        }
+
+        function typeColor(type) {
+            const colors = {
+                http: 'bg-blue-100 text-blue-700',
+                https: 'bg-green-100 text-green-700',
+                ws: 'bg-purple-100 text-purple-700',
+                tcp: 'bg-orange-100 text-orange-700',
+                udp: 'bg-yellow-100 text-yellow-700',
+                'tunnel-http': 'bg-indigo-100 text-indigo-700',
+                'tunnel-tcp': 'bg-pink-100 text-pink-700',
+            };
+            return colors[type] || 'bg-gray-100 text-gray-700';
+        }
+
+        // 异步查询隧道在线状态，并更新卡片图标
+        async function checkTunnelStatus(channelID) {
+            try {
+                const resp = await fetch(`/tunnel/status/${channelID}`);
+                const data = await resp.json();
+                const dot = document.getElementById(`tunnel-dot-${channelID}`);
+                const label = document.getElementById(`tunnel-label-${channelID}`);
+                if (dot && label) {
+                    dot.className = `w-2 h-2 rounded-full ${data.online ? 'bg-green-500' : 'bg-red-400'}`;
+                    label.textContent = data.online ? '在线' : '离线';
+                    label.className = `text-xs ${data.online ? 'text-green-600' : 'text-red-400'}`;
+                }
+            } catch (e) {}
+        }
+
+        function onTypeChange(type) {
+            const tip = document.getElementById('tunnel-tip');
+            if (type === 'tunnel-http' || type === 'tunnel-tcp') {
+                tip.classList.remove('hidden');
+                const target = document.getElementById('channel-target').value || 'http://localhost:3000';
+                document.getElementById('tip-target').textContent = target;
+                document.getElementById('tip-server').textContent = window.location.origin;
+            } else {
+                tip.classList.add('hidden');
+            }
+        }
+
+        function openCreateModal() {
+            document.getElementById('create-modal').classList.remove('hidden');
+        }
+
+        function closeCreateModal() {
+            document.getElementById('create-modal').classList.add('hidden');
+            document.getElementById('create-form').reset();
+        }
+
+        async function submitCreateChannel(e) {
+            e.preventDefault();
+            const payload = {
+                name: document.getElementById('channel-name').value,
+                type: document.getElementById('channel-type').value,
+                target: document.getElementById('channel-target').value,
+                description: document.getElementById('channel-description').value,
+            };
+
+            try {
+                const resp = await fetch(`${API_BASE}/channels`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    closeCreateModal();
+                    await loadChannels();
+
+                    // tunnel 类型：展示 secret 和启动命令（仅此一次）
+                    if (data.secret) {
+                        showSecretModal(data.channel, data.secret, data.setup_command);
+                    } else {
+                        alert(`Channel 创建成功！\n访问地址：${data.endpoint}`);
+                    }
+                } else {
+                    alert(`创建失败：${data.error}`);
+                }
+            } catch (err) {
+                alert('创建失败，请重试');
+            }
+        }
+
+        async function deleteChannel(id, name) {
+            if (!confirm(`确认删除 Channel "${name}"？\n\n删除后该 Channel 的地址将立即失效。`)) return;
+            try {
+                const resp = await fetch(`${API_BASE}/channels/${id}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (resp.ok) await loadChannels();
+                else alert('删除失败');
+            } catch (err) {
+                alert('删除失败，请重试');
+            }
+        }
+
+        async function toggleChannel(id, isActive) {
+            try {
+                const resp = await fetch(`${API_BASE}/channels/${id}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ is_active: isActive })
+                });
+                if (resp.ok) await loadChannels();
+            } catch (err) {
+                alert('操作失败，请重试');
+            }
+        }
+
+        async function generateToken() {
+            const ttl = document.getElementById('token-ttl').value;
+            try {
+                const resp = await fetch(`${API_BASE}/tokens`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ ttl })
+                });
+                const data = await resp.json();
+                if (resp.ok) {
+                    document.getElementById('token-value').textContent = data.token;
+                    document.getElementById('token-expires').textContent = `过期时间：${new Date(data.expires_at).toLocaleString()}`;
+                    document.getElementById('generated-token').classList.remove('hidden');
+                } else {
+                    alert(`生成失败：${data.error}`);
+                }
+            } catch (err) {
+                alert('生成失败，请重试');
+            }
+        }
+
+        function copyToken() {
+            const tokenVal = document.getElementById('token-value').textContent;
+            navigator.clipboard.writeText(tokenVal).then(() => {
+                alert('Token 已复制到剪贴板');
+            });
+        }
+
+        function copyEndpoint(endpoint) {
+            navigator.clipboard.writeText(endpoint).then(() => {
+                const toast = document.createElement('div');
+                toast.textContent = '地址已复制';
+                toast.className = 'fixed bottom-4 right-4 bg-gray-800 text-white py-2 px-4 rounded-lg text-sm z-50';
+                document.body.appendChild(toast);
+                setTimeout(() => toast.remove(), 2000);
+            });
+        }
+
+        // ── Secret 弹窗 ────────────────────────────────────────────────────────
+        function showSecretModal(channel, secret, setupCommand) {
+            document.getElementById('secret-value').textContent = secret;
+            document.getElementById('setup-command').textContent = setupCommand;
+            document.getElementById('secret-modal').classList.remove('hidden');
+        }
+
+        function closeSecretModal() {
+            document.getElementById('secret-modal').classList.add('hidden');
+        }
+
+        function copySecret() {
+            const val = document.getElementById('secret-value').textContent;
+            navigator.clipboard.writeText(val).then(() => showToast('Secret 已复制'));
+        }
+
+        function copySetupCommand() {
+            const val = document.getElementById('setup-command').textContent;
+            navigator.clipboard.writeText(val).then(() => showToast('命令已复制'));
+        }
+
+        function showToast(msg) {
+            const t = document.createElement('div');
+            t.textContent = msg;
+            t.className = 'fixed bottom-4 right-4 bg-gray-800 text-white py-2 px-4 rounded-lg text-sm z-50';
+            document.body.appendChild(t);
+            setTimeout(() => t.remove(), 2000);
+        }
+
+        function logout() {
+            localStorage.removeItem('access_token');
+            window.location.href = '/login';
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.appendChild(document.createTextNode(str));
+            return div.innerHTML;
+        }
+
+        function formatBytes(bytes) {
+            if (bytes < 1024) return `${bytes} B`;
+            if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+            return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+        }
+
+        function formatDate(dateStr) {
+            if (!dateStr) return '未知';
+            return new Date(dateStr).toLocaleDateString('zh-CN');
+        }
+
+        // 初始化
+        init();
+        // 每30秒刷新统计
+        setInterval(loadChannels, 30000);
+
+        // ── 限流规则弹窗 ────────────────────────────────────────────────────────
+        let currentChannelID = null;
+
+        function openRateLimitModal(channelID) {
+            currentChannelID = channelID;
+            document.getElementById('ratelimit-modal').classList.remove('hidden');
+            loadRateLimitRules(channelID);
+        }
+
+        function closeRateLimitModal() {
+            document.getElementById('ratelimit-modal').classList.add('hidden');
+            currentChannelID = null;
+        }
+
+        async function loadRateLimitRules(channelID) {
+            const list = document.getElementById('ratelimit-rules-list');
+            try {
+                const resp = await fetch(`${API_BASE}/channels/${channelID}/rate-limits`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const data = await resp.json();
+                const rules = data.rules || [];
+                if (rules.length === 0) {
+                    list.innerHTML = '<p class="text-gray-400 text-sm text-center py-4">暂无限流规则</p>';
+                    return;
+                }
+                const typeLabel = { bandwidth: '带宽', connections: '并发连接', requests: '请求速率' };
+                const typeUnit  = { bandwidth: 'Mbps', connections: '个', requests: 'rps' };
+                list.innerHTML = rules.map(r => `
+                    <div class="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
+                        <span class="text-sm text-gray-700">
+                            <span class="font-medium">${typeLabel[r.rule_type] || r.rule_type}</span>
+                            &nbsp;≤&nbsp;${r.limit_value} ${typeUnit[r.rule_type] || ''}
+                        </span>
+                        <button onclick="deleteRateLimitRule('${channelID}', '${r.id}')"
+                            class="text-red-400 hover:text-red-600 text-xs ml-3">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
+                `).join('');
+            } catch (err) {
+                list.innerHTML = '<p class="text-red-400 text-sm text-center py-4">加载失败</p>';
+            }
+        }
+
+        async function submitRateLimit() {
+            if (!currentChannelID) return;
+            const payload = {
+                rule_type:   document.getElementById('rl-type').value,
+                limit_value: parseFloat(document.getElementById('rl-value').value),
+                time_window: document.getElementById('rl-window').value,
+            };
+            if (!payload.limit_value || payload.limit_value <= 0) {
+                alert('请填写有效的限制值');
+                return;
+            }
+            try {
+                const resp = await fetch(`${API_BASE}/channels/${currentChannelID}/rate-limits`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(payload)
+                });
+                if (resp.ok) {
+                    document.getElementById('rl-value').value = '';
+                    await loadRateLimitRules(currentChannelID);
+                } else {
+                    const data = await resp.json();
+                    alert(`添加失败：${data.error}`);
+                }
+            } catch (err) {
+                alert('添加失败，请重试');
+            }
+        }
+
+        async function deleteRateLimitRule(channelID, ruleID) {
+            if (!confirm('确认删除该限流规则？')) return;
+            try {
+                const resp = await fetch(`${API_BASE}/channels/${channelID}/rate-limits/${ruleID}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (resp.ok) await loadRateLimitRules(channelID);
+            } catch (err) {
+                alert('删除失败，请重试');
+            }
+        }
+    </script>
+</body>
+</html>
