@@ -2,7 +2,9 @@ package services
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
@@ -23,6 +25,11 @@ func NewAuthService(db *DatabaseService, redis *RedisService) *AuthService {
 	return &AuthService{db: db, redis: redis}
 }
 
+// DB 暴露底层 gorm.DB，供管理后台使用
+func (s *AuthService) DB() *gorm.DB {
+	return s.db.DB
+}
+
 var (
 	ErrUserNotFound        = errors.New("user not found")
 	ErrInvalidToken        = errors.New("invalid token")
@@ -31,7 +38,7 @@ var (
 	ErrInvalidCredentials  = errors.New("invalid email or password")
 	ErrInvalidCode         = errors.New("invalid or expired verification code")
 	ErrCodeAlreadyUsed     = errors.New("verification code already used")
-)
+var ErrWeakPassword = errors.New("password must be at least 8 characters")
 
 func (s *AuthService) CreateOrGetUser(provider, providerID, email, name, avatar string) (*models.User, error) {
 	var user models.User
@@ -65,17 +72,26 @@ func (s *AuthService) CreateOrGetUser(provider, providerID, email, name, avatar 
 	return &user, nil
 }
 
+// hashToken 对原始 token 做 SHA-256，返回 hex 字符串
+// 数据库中只存摘要，原始 token 只在内存/响应中短暂存在
+func hashToken(raw string) string {
+	h := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(h[:])
+}
+
 func (s *AuthService) GenerateAccessToken(userID string, ttl time.Duration) (*models.AccessToken, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return nil, err
 	}
 
-	token := base64.URLEncoding.EncodeToString(b)
+	rawToken := base64.URLEncoding.EncodeToString(b)
+	tokenHash := hashToken(rawToken)
+
 	at := &models.AccessToken{
 		ID:        uuid.New().String(),
 		UserID:    userID,
-		Token:     token,
+		Token:     tokenHash, // 存摘要，不存原文
 		ExpiresAt: time.Now().Add(ttl),
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
@@ -85,18 +101,24 @@ func (s *AuthService) GenerateAccessToken(userID string, ttl time.Duration) (*mo
 		return nil, err
 	}
 
-	key := fmt.Sprintf("token:%s", token)
+	// Redis 缓存 key 也用摘要
+	key := fmt.Sprintf("token:%s", tokenHash)
 	s.redis.Set(key, userID, ttl)
 
-	return at, nil
+	// 返回的 AccessToken 临时把 rawToken 放入 Token 字段，供调用方返回给客户端
+	// 注意：此值不持久化，DB 里只有 hash
+	result := *at
+	result.Token = rawToken
+	return &result, nil
 }
 
 func (s *AuthService) ValidateToken(tokenString string) (*models.User, error) {
-	key := fmt.Sprintf("token:%s", tokenString)
+	tokenHash := hashToken(tokenString)
+	key := fmt.Sprintf("token:%s", tokenHash)
 	userID, err := s.redis.Get(key)
 	if err != nil {
 		var at models.AccessToken
-		if err := s.db.DB.Where("token = ? AND deleted_at IS NULL", tokenString).First(&at).Error; err != nil {
+		if err := s.db.DB.Where("token = ? AND deleted_at IS NULL", tokenHash).First(&at).Error; err != nil {
 			return nil, ErrInvalidToken
 		}
 		if at.ExpiresAt.Before(time.Now()) {
@@ -118,17 +140,37 @@ func (s *AuthService) ValidateToken(tokenString string) (*models.User, error) {
 }
 
 func (s *AuthService) RevokeToken(tokenString string) error {
-	if err := s.db.DB.Where("token = ?", tokenString).Delete(&models.AccessToken{}).Error; err != nil {
+	tokenHash := hashToken(tokenString)
+	if err := s.db.DB.Where("token = ?", tokenHash).Delete(&models.AccessToken{}).Error; err != nil {
 		return err
 	}
-	key := fmt.Sprintf("token:%s", tokenString)
+	key := fmt.Sprintf("token:%s", tokenHash)
 	return s.redis.Delete(key)
 }
 
 // ─── 邮箱注册 / 登录 ────────────────────────────────────────────────────────
 
+const (
+	codeResendCooldown  = 60 * time.Second // 同邮箱同目的发送冷却
+	codeMaxAttempts     = 5                // 最多错误次数
+)
+
 // SendEmailCode 生成并保存 6 位验证码，返回 code（由 EmailService 发送）
+// 频率限制：同邮箱同目的 60 秒内只能发一次
 func (s *AuthService) SendEmailCode(email, purpose string) (string, error) {
+	// 冷却时间校验：如果 60 秒内已有未使用的有效验证码，拒绝
+	var existing models.EmailVerification
+	err := s.db.DB.Where(
+		"email = ? AND purpose = ? AND deleted_at IS NULL AND used_at IS NULL AND expires_at > ?",
+		email, purpose, time.Now(),
+	).Order("created_at DESC").First(&existing).Error
+	if err == nil {
+		// 存在有效验证码，检查是否还在冷却期
+		if time.Since(existing.CreatedAt) < codeResendCooldown {
+			return "", ErrCodeSendTooFrequent
+		}
+	}
+
 	code, err := generateNumericCode(6)
 	if err != nil {
 		return "", err
@@ -154,6 +196,11 @@ func (s *AuthService) SendEmailCode(email, purpose string) (string, error) {
 
 // RegisterWithEmail 用邮箱+密码注册（需先验证邮箱验证码）
 func (s *AuthService) RegisterWithEmail(email, password, name, code string) (*models.User, error) {
+	// 密码强度校验
+	if len(password) < 8 {
+		return nil, ErrWeakPassword
+	}
+
 	// 校验验证码
 	if err := s.consumeEmailCode(email, code, "register"); err != nil {
 		return nil, err
@@ -248,21 +295,37 @@ func (s *AuthService) LoginWithEmailCode(email, code string) (*models.User, erro
 }
 
 // consumeEmailCode 校验并标记验证码为已使用
+// 每次错误都递增 Attempts，超过 codeMaxAttempts 后软删除该验证码（强制失效）
 func (s *AuthService) consumeEmailCode(email, code, purpose string) error {
 	var ev models.EmailVerification
 	err := s.db.DB.Where(
-		"email = ? AND code = ? AND purpose = ? AND deleted_at IS NULL",
-		email, code, purpose,
-	).First(&ev).Error
+		"email = ? AND purpose = ? AND deleted_at IS NULL AND used_at IS NULL",
+		email, purpose,
+	).Order("created_at DESC").First(&ev).Error
 	if err != nil {
 		return ErrInvalidCode
-	}
-	if ev.UsedAt != nil {
-		return ErrCodeAlreadyUsed
 	}
 	if ev.ExpiresAt.Before(time.Now()) {
 		return ErrInvalidCode
 	}
+
+	// 错误次数超限：直接软删除，防止爆破
+	if ev.Attempts >= codeMaxAttempts {
+		s.db.DB.Delete(&ev)
+		return ErrCodeTooManyAttempts
+	}
+
+	if ev.Code != code {
+		// 记录失败次数
+		s.db.DB.Model(&ev).Update("attempts", ev.Attempts+1)
+		// 达到上限时立即失效
+		if ev.Attempts+1 >= codeMaxAttempts {
+			s.db.DB.Delete(&ev)
+			return ErrCodeTooManyAttempts
+		}
+		return ErrInvalidCode
+	}
+
 	now := time.Now()
 	s.db.DB.Model(&ev).Update("used_at", &now)
 	return nil

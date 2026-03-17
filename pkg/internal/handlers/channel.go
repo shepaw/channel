@@ -35,8 +35,8 @@ func (h *ChannelHandler) SetV2(v2 *services.ChannelServiceV2, ph *ProxyHandler) 
 type CreateChannelRequest struct {
 	Name        string                 `json:"name"   binding:"required,max=100"`
 	Description string                 `json:"description"`
-	Type        string                 `json:"type"   binding:"required,oneof=http https ws tcp udp"`
-	Target      string                 `json:"target" binding:"required"`
+	Type        string                 `json:"type"   binding:"required,oneof=http https ws tcp udp tunnel-http tunnel-tcp"`
+	Target      string                 `json:"target"`
 	Config      map[string]interface{} `json:"config"`
 }
 
@@ -58,6 +58,13 @@ func (h *ChannelHandler) Create(c *gin.Context) {
 	var req CreateChannelRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// tunnel 类型由 agent 端指定 target，server 端 target 可为空；其他类型必须填 target
+	isTunnel := req.Type == "tunnel-http" || req.Type == "tunnel-tcp"
+	if !isTunnel && req.Target == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target is required for type: " + req.Type})
 		return
 	}
 
@@ -117,8 +124,10 @@ func (h *ChannelHandler) Create(c *gin.Context) {
 		baseURL := h.config.BaseURL
 		setupCmd := "channel-agent --server " + baseURL +
 			" --channel-id " + channel.ID +
-			" --secret " + channel.Secret +
-			" --target " + channel.Target
+			" --secret " + channel.Secret
+		if channel.Target != "" {
+			setupCmd += " --target " + channel.Target
+		}
 		c.JSON(http.StatusCreated, gin.H{
 			"channel":       channel,
 			"secret":        channel.Secret,

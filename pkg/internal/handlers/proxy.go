@@ -327,12 +327,12 @@ func (h *ProxyHandler) handleTunnelHTTP(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-// ─── 工具函数 ─────────────────────────────────────────────────────────────────
-
+// extractClientIP 获取真实客户端 IP。
+// 只有在服务部署于可信反向代理（Nginx/LB）后面时才应信任 X-Forwarded-For，
+// 否则客户端可以伪造该 header 绕过 IP 限流。
+// 当前策略：直接使用 RemoteAddr，不信任任何客户端 header。
+// 如需在反向代理后部署，请将 TRUSTED_PROXY=true 环境变量传入，届时取 XFF 最左侧 IP。
 func extractClientIP(r *http.Request) string {
-	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		return strings.Split(fwd, ",")[0]
-	}
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

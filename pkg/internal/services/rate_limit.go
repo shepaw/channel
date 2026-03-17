@@ -49,6 +49,10 @@ func (r *RateLimitService) CheckBandwidth(channelID, clientIP string, bytes int6
 }
 
 // CheckConnections 检查并发连接数，返回 (允许, 剩余数, error)
+//
+// 修复说明：
+//   - 每次 INCR 后刷新 TTL（= TimeWindow × 10，兜底防泄漏）
+//   - 即使连接异常断开未调用 DecrementConnections，计数也会在 TTL 到期后自动归零
 func (r *RateLimitService) CheckConnections(channelID string) (bool, float64, error) {
 	rule, err := r.getActiveRule(channelID, "connections")
 	if err != nil {
@@ -61,6 +65,14 @@ func (r *RateLimitService) CheckConnections(channelID string) (bool, float64, er
 		return true, 0, err
 	}
 
+	// 兜底 TTL：TimeWindow × 10，确保异常断开后计数最终自动清除
+	// 每次有新连接时都刷新 TTL，活跃期间不会提前过期
+	safetyTTL := time.Duration(rule.TimeWindow) * 10
+	if safetyTTL < 30*time.Second {
+		safetyTTL = 30 * time.Second // 最小 30s，避免短 window 下过于激进
+	}
+	r.redis.Expire(key, safetyTTL)
+
 	allowed := current <= int64(rule.LimitValue)
 	remaining := rule.LimitValue - float64(current)
 	if remaining < 0 {
@@ -70,10 +82,26 @@ func (r *RateLimitService) CheckConnections(channelID string) (bool, float64, er
 }
 
 // DecrementConnections 连接断开时递减计数
+//
+// 修复说明：
+//   - 递减后若计数 <= 0，直接删除 key，避免负数积累
 func (r *RateLimitService) DecrementConnections(channelID string) error {
 	key := fmt.Sprintf("rl:%s:conns", channelID)
-	_, err := r.redis.IncrBy(key, -1)
-	return err
+	current, err := r.redis.IncrBy(key, -1)
+	if err != nil {
+		return err
+	}
+	if current <= 0 {
+		// 计数归零，删除 key 而非留下 0 或负数
+		r.redis.Delete(key)
+	}
+	return nil
+}
+
+// ResetConnections 强制归零指定 channel 的连接计数（进程重启或运维修复时调用）
+func (r *RateLimitService) ResetConnections(channelID string) error {
+	key := fmt.Sprintf("rl:%s:conns", channelID)
+	return r.redis.Delete(key)
 }
 
 // CheckRequests 检查请求速率（rps），返回 (允许, 剩余rps, error)

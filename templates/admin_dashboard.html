@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Channel Service - 管理后台</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6/css/all.min.css" rel="stylesheet">
+    <style>
+        .sidebar { width: 240px; }
+        .main-content { margin-left: 240px; }
+        @media (max-width: 768px) { .sidebar { width: 100%; position: static; } .main-content { margin-left: 0; } }
+        .nav-item.active { background: #3730a3; color: #fff; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 11px; font-weight: 600; }
+        .badge-green  { background: #d1fae5; color: #065f46; }
+        .badge-red    { background: #fee2e2; color: #991b1b; }
+        .badge-blue   { background: #dbeafe; color: #1e40af; }
+        .badge-gray   { background: #f3f4f6; color: #374151; }
+    </style>
+</head>
+<body class="bg-gray-100">
+
+<!-- 侧边栏 -->
+<div class="sidebar bg-gray-900 text-white fixed top-0 left-0 h-full flex flex-col">
+    <div class="p-5 border-b border-gray-800">
+        <div class="flex items-center gap-2">
+            <div class="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center">
+                <i class="fas fa-shield-alt text-white text-sm"></i>
+            </div>
+            <div>
+                <p class="font-bold text-sm">管理后台</p>
+                <p class="text-gray-500 text-xs">Channel Service</p>
+            </div>
+        </div>
+    </div>
+
+    <nav class="flex-1 p-3 space-y-1">
+        <a href="#" onclick="showTab('overview')" id="nav-overview"
+           class="nav-item active flex items-center gap-3 py-2 px-3 rounded-lg text-gray-300 hover:bg-gray-700 text-sm transition">
+            <i class="fas fa-chart-pie w-4"></i> 概览
+        </a>
+        <a href="#" onclick="showTab('users')" id="nav-users"
+           class="nav-item flex items-center gap-3 py-2 px-3 rounded-lg text-gray-300 hover:bg-gray-700 text-sm transition">
+            <i class="fas fa-users w-4"></i> 用户管理
+        </a>
+        <a href="#" onclick="showTab('channels')" id="nav-channels"
+           class="nav-item flex items-center gap-3 py-2 px-3 rounded-lg text-gray-300 hover:bg-gray-700 text-sm transition">
+            <i class="fas fa-network-wired w-4"></i> Channel 管理
+        </a>
+    </nav>
+
+    <div class="p-3 border-t border-gray-800">
+        <a href="/admin/logout"
+           class="flex items-center gap-2 py-2 px-3 rounded-lg text-gray-400 hover:text-white hover:bg-gray-700 text-sm transition">
+            <i class="fas fa-sign-out-alt w-4"></i> 退出登录
+        </a>
+    </div>
+</div>
+
+<!-- 主内容 -->
+<div class="main-content min-h-screen">
+    <header class="bg-white border-b border-gray-200 px-8 py-4 flex items-center justify-between">
+        <h2 id="page-title" class="text-lg font-semibold text-gray-800">概览</h2>
+        <span class="text-xs text-gray-400">管理员：{{ .AdminEmail }}</span>
+    </header>
+
+    <div class="p-8">
+
+        <!-- ── 概览 ── -->
+        <div id="tab-overview">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                <div class="bg-white rounded-xl p-6 shadow-sm">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-500 text-sm">注册用户</p>
+                            <p id="stat-users" class="text-3xl font-bold text-gray-800 mt-1">-</p>
+                        </div>
+                        <div class="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center">
+                            <i class="fas fa-users text-blue-500 text-xl"></i>
+                        </div>
+                    </div>
+                </div>
+                <div class="bg-white rounded-xl p-6 shadow-sm">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-500 text-sm">Channel 总数</p>
+                            <p id="stat-channels" class="text-3xl font-bold text-gray-800 mt-1">-</p>
+                        </div>
+                        <div class="w-12 h-12 bg-purple-50 rounded-xl flex items-center justify-center">
+                            <i class="fas fa-network-wired text-purple-500 text-xl"></i>
+                        </div>
+                    </div>
+                </div>
+                <div class="bg-white rounded-xl p-6 shadow-sm">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-500 text-sm">活跃 Channel</p>
+                            <p id="stat-active" class="text-3xl font-bold text-gray-800 mt-1">-</p>
+                        </div>
+                        <div class="w-12 h-12 bg-green-50 rounded-xl flex items-center justify-center">
+                            <i class="fas fa-check-circle text-green-500 text-xl"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── 用户管理 ── -->
+        <div id="tab-users" class="hidden">
+            <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+                <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                    <h3 class="font-semibold text-gray-800">用户列表</h3>
+                    <span id="users-total" class="text-sm text-gray-400"></span>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+                            <tr>
+                                <th class="px-6 py-3 text-left">用户</th>
+                                <th class="px-6 py-3 text-left">邮箱</th>
+                                <th class="px-6 py-3 text-left">登录方式</th>
+                                <th class="px-6 py-3 text-left">Channel 数</th>
+                                <th class="px-6 py-3 text-left">注册时间</th>
+                            </tr>
+                        </thead>
+                        <tbody id="users-tbody" class="divide-y divide-gray-100"></tbody>
+                    </table>
+                </div>
+                <div id="users-pagination" class="px-6 py-3 border-t border-gray-100 flex items-center justify-between text-sm text-gray-500"></div>
+            </div>
+        </div>
+
+        <!-- ── Channel 管理 ── -->
+        <div id="tab-channels" class="hidden">
+            <!-- 过滤 -->
+            <div class="flex gap-3 mb-4 flex-wrap">
+                <select id="filter-type" onchange="loadChannels(1)"
+                    class="border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+                    <option value="">全部类型</option>
+                    <option value="http">HTTP</option>
+                    <option value="https">HTTPS</option>
+                    <option value="ws">WebSocket</option>
+                    <option value="tcp">TCP</option>
+                    <option value="udp">UDP</option>
+                    <option value="tunnel-http">Tunnel HTTP</option>
+                    <option value="tunnel-tcp">Tunnel TCP</option>
+                </select>
+                <input id="filter-user" placeholder="按用户 ID 筛选" onchange="loadChannels(1)"
+                    class="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
+            </div>
+
+            <div class="bg-white rounded-xl shadow-sm overflow-hidden">
+                <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between">
+                    <h3 class="font-semibold text-gray-800">Channel 列表</h3>
+                    <span id="channels-total" class="text-sm text-gray-400"></span>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-sm">
+                        <thead class="bg-gray-50 text-gray-500 text-xs uppercase">
+                            <tr>
+                                <th class="px-6 py-3 text-left">名称</th>
+                                <th class="px-6 py-3 text-left">类型</th>
+                                <th class="px-6 py-3 text-left">Endpoint</th>
+                                <th class="px-6 py-3 text-left">所有者</th>
+                                <th class="px-6 py-3 text-left">状态</th>
+                                <th class="px-6 py-3 text-left">创建时间</th>
+                                <th class="px-6 py-3 text-left">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="channels-tbody" class="divide-y divide-gray-100"></tbody>
+                    </table>
+                </div>
+                <div id="channels-pagination" class="px-6 py-3 border-t border-gray-100 flex items-center justify-between text-sm text-gray-500"></div>
+            </div>
+        </div>
+
+    </div>
+</div>
+
+<!-- 确认弹窗 -->
+<div id="confirm-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div class="bg-white rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl">
+        <h3 id="confirm-title" class="font-semibold text-gray-800 mb-2">确认操作</h3>
+        <p id="confirm-msg" class="text-gray-500 text-sm mb-5"></p>
+        <div class="flex gap-3 justify-end">
+            <button onclick="closeConfirm()" class="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg">取消</button>
+            <button id="confirm-btn" class="px-4 py-2 text-sm bg-red-600 hover:bg-red-700 text-white rounded-lg">确认</button>
+        </div>
+    </div>
+</div>
+
+<script>
+const API = '/admin/api';
+let usersPage = 1, channelsPage = 1;
+let confirmCallback = null;
+
+// ── Tab 切换 ─────────────────────────────────────────────────────────────────
+function showTab(name) {
+    ['overview', 'users', 'channels'].forEach(t => {
+        document.getElementById('tab-' + t).classList.toggle('hidden', t !== name);
+        document.getElementById('nav-' + t).classList.toggle('active', t === name);
+    });
+    const titles = { overview: '概览', users: '用户管理', channels: 'Channel 管理' };
+    document.getElementById('page-title').textContent = titles[name];
+
+    if (name === 'overview') loadStats();
+    if (name === 'users') loadUsers(1);
+    if (name === 'channels') loadChannels(1);
+}
+
+// ── 概览 ─────────────────────────────────────────────────────────────────────
+async function loadStats() {
+    const res = await fetch(`${API}/stats`);
+    const data = await res.json();
+    document.getElementById('stat-users').textContent    = data.users    ?? '-';
+    document.getElementById('stat-channels').textContent = data.channels ?? '-';
+    document.getElementById('stat-active').textContent   = data.active_channels ?? '-';
+}
+
+// ── 用户 ─────────────────────────────────────────────────────────────────────
+async function loadUsers(page) {
+    usersPage = page;
+    const res = await fetch(`${API}/users?page=${page}&size=20`);
+    const data = await res.json();
+    const users = data.users || [];
+    const { total } = data.pagination;
+
+    document.getElementById('users-total').textContent = `共 ${total} 名用户`;
+    document.getElementById('users-tbody').innerHTML = users.map(u => `
+        <tr class="hover:bg-gray-50">
+            <td class="px-6 py-3">
+                <div class="flex items-center gap-3">
+                    <img src="${u.avatar || 'https://via.placeholder.com/32'}" class="w-8 h-8 rounded-full object-cover">
+                    <span class="font-medium text-gray-800">${esc(u.name || '—')}</span>
+                </div>
+            </td>
+            <td class="px-6 py-3 text-gray-600">${esc(u.email)}</td>
+            <td class="px-6 py-3">
+                <span class="badge ${providerBadge(u.provider)}">${esc(u.provider)}</span>
+            </td>
+            <td class="px-6 py-3 text-gray-600">${u.channel_count}</td>
+            <td class="px-6 py-3 text-gray-400">${fmtDate(u.created_at)}</td>
+        </tr>
+    `).join('');
+
+    renderPagination('users-pagination', page, total, 20, loadUsers);
+}
+
+// ── Channel ───────────────────────────────────────────────────────────────────
+async function loadChannels(page) {
+    channelsPage = page;
+    const type   = document.getElementById('filter-type').value;
+    const userId = document.getElementById('filter-user').value.trim();
+    let url = `${API}/channels?page=${page}&size=20`;
+    if (type)   url += `&type=${type}`;
+    if (userId) url += `&user_id=${encodeURIComponent(userId)}`;
+
+    const res = await fetch(url);
+    const data = await res.json();
+    const channels = data.channels || [];
+    const { total } = data.pagination;
+
+    document.getElementById('channels-total').textContent = `共 ${total} 个 Channel`;
+    document.getElementById('channels-tbody').innerHTML = channels.map(ch => `
+        <tr class="hover:bg-gray-50" id="ch-row-${ch.id}">
+            <td class="px-6 py-3 font-medium text-gray-800">${esc(ch.name)}</td>
+            <td class="px-6 py-3"><span class="badge badge-blue">${esc(ch.type)}</span></td>
+            <td class="px-6 py-3 text-gray-500 font-mono text-xs max-w-xs truncate">${esc(ch.endpoint)}</td>
+            <td class="px-6 py-3">
+                <div class="text-sm text-gray-700">${esc(ch.owner_name || '—')}</div>
+                <div class="text-xs text-gray-400">${esc(ch.owner_email || '')}</div>
+            </td>
+            <td class="px-6 py-3">
+                <span id="ch-status-${ch.id}" class="badge ${ch.is_active ? 'badge-green' : 'badge-red'}">
+                    ${ch.is_active ? '活跃' : '禁用'}
+                </span>
+            </td>
+            <td class="px-6 py-3 text-gray-400">${fmtDate(ch.created_at)}</td>
+            <td class="px-6 py-3">
+                <div class="flex gap-2">
+                    <button onclick="toggleChannel('${ch.id}', ${ch.is_active})"
+                        class="text-xs px-2 py-1 rounded border ${ch.is_active ? 'border-yellow-400 text-yellow-600 hover:bg-yellow-50' : 'border-green-400 text-green-600 hover:bg-green-50'}">
+                        ${ch.is_active ? '禁用' : '启用'}
+                    </button>
+                    <button onclick="deleteChannel('${ch.id}', '${esc(ch.name)}')"
+                        class="text-xs px-2 py-1 rounded border border-red-300 text-red-500 hover:bg-red-50">
+                        删除
+                    </button>
+                </div>
+            </td>
+        </tr>
+    `).join('');
+
+    renderPagination('channels-pagination', page, total, 20, loadChannels);
+}
+
+async function toggleChannel(id, isActive) {
+    const action = isActive ? '禁用' : '启用';
+    showConfirm(`${action} Channel`, `确定要${action}该 Channel 吗？`, async () => {
+        const res = await fetch(`${API}/channels/${id}/toggle`, { method: 'PUT' });
+        const data = await res.json();
+        const badge = document.getElementById(`ch-status-${id}`);
+        if (badge) {
+            badge.className = `badge ${data.is_active ? 'badge-green' : 'badge-red'}`;
+            badge.textContent = data.is_active ? '活跃' : '禁用';
+        }
+        loadChannels(channelsPage); // 刷新按钮状态
+    });
+}
+
+async function deleteChannel(id, name) {
+    showConfirm('删除 Channel', `确定要永久删除 "${name}" 吗？此操作不可恢复。`, async () => {
+        await fetch(`${API}/channels/${id}`, { method: 'DELETE' });
+        loadChannels(channelsPage);
+    });
+}
+
+// ── 分页 ──────────────────────────────────────────────────────────────────────
+function renderPagination(containerId, page, total, size, loadFn) {
+    const totalPages = Math.ceil(total / size);
+    const el = document.getElementById(containerId);
+    if (totalPages <= 1) { el.innerHTML = ''; return; }
+
+    el.innerHTML = `
+        <span>第 ${page} / ${totalPages} 页，共 ${total} 条</span>
+        <div class="flex gap-2">
+            <button ${page <= 1 ? 'disabled' : ''} onclick="(${loadFn.name})(${page - 1})"
+                class="px-3 py-1 rounded border ${page <= 1 ? 'text-gray-300 border-gray-200 cursor-not-allowed' : 'border-gray-300 hover:bg-gray-50'}">上一页</button>
+            <button ${page >= totalPages ? 'disabled' : ''} onclick="(${loadFn.name})(${page + 1})"
+                class="px-3 py-1 rounded border ${page >= totalPages ? 'text-gray-300 border-gray-200 cursor-not-allowed' : 'border-gray-300 hover:bg-gray-50'}">下一页</button>
+        </div>
+    `;
+}
+
+// ── 确认弹窗 ──────────────────────────────────────────────────────────────────
+function showConfirm(title, msg, cb) {
+    document.getElementById('confirm-title').textContent = title;
+    document.getElementById('confirm-msg').textContent   = msg;
+    confirmCallback = cb;
+    document.getElementById('confirm-modal').classList.remove('hidden');
+    document.getElementById('confirm-btn').onclick = async () => {
+        closeConfirm();
+        await cb();
+    };
+}
+function closeConfirm() {
+    document.getElementById('confirm-modal').classList.add('hidden');
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function esc(str) {
+    return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function fmtDate(iso) {
+    if (!iso) return '—';
+    return new Date(iso).toLocaleString('zh-CN', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' });
+}
+function providerBadge(p) {
+    return { google: 'badge-blue', wechat: 'badge-green', email: 'badge-gray' }[p] || 'badge-gray';
+}
+
+// ── 初始化 ────────────────────────────────────────────────────────────────────
+loadStats();
+</script>
+</body>
+</html>

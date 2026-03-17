@@ -35,6 +35,14 @@ type Config struct {
 	SMTPPassword string `json:"smtp_password"`
 	SMTPFrom     string `json:"smtp_from"` // 发件人地址，如 noreply@example.com
 
+	// 管理后台
+	AdminEmail string `json:"admin_email"` // 允许登录管理后台的 Google 账号邮箱
+
+	// 安全
+	// AllowedOrigins 控制 CORS 允许的来源，例如 ["https://app.example.com"]
+	// 留空表示不允许任何跨域请求；设为 ["*"] 表示允许所有来源（不建议生产环境使用）
+	AllowedOrigins []string `json:"allowed_origins"`
+
 	// TCP/UDP 端口范围
 	TCPPortRangeStart int `json:"tcp_port_range_start"` // 如 10000
 	TCPPortRangeEnd   int `json:"tcp_port_range_end"`   // 如 20000

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -60,6 +61,9 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	})
 }
 
+// maxTokenTTL 用户可申请的 token 最大有效期，超出则拒绝
+const maxTokenTTL = 90 * 24 * time.Hour
+
 func (h *AuthHandler) GenerateToken(c *gin.Context) {
 	var req TokenRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -79,6 +83,14 @@ func (h *AuthHandler) GenerateToken(c *gin.Context) {
 		parsedTTL, err := time.ParseDuration(req.TTL)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid TTL format"})
+			return
+		}
+		if parsedTTL <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "TTL must be positive"})
+			return
+		}
+		if parsedTTL > maxTokenTTL {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("TTL too large, maximum is %s", maxTokenTTL)})
 			return
 		}
 		ttl = parsedTTL

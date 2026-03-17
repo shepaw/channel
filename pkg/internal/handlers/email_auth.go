@@ -193,6 +193,12 @@ func mapEmailAuthError(err error) (int, string) {
 		return http.StatusUnprocessableEntity, "Invalid or expired verification code"
 	case services.ErrCodeAlreadyUsed:
 		return http.StatusUnprocessableEntity, "Verification code already used"
+	case services.ErrCodeSendTooFrequent:
+		return http.StatusTooManyRequests, "Please wait 60 seconds before requesting another code"
+	case services.ErrCodeTooManyAttempts:
+		return http.StatusTooManyRequests, "Too many incorrect attempts, please request a new code"
+	case services.ErrWeakPassword:
+		return http.StatusBadRequest, "Password must be at least 8 characters"
 	default:
 		return http.StatusInternalServerError, "Internal server error"
 	}

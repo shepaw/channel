@@ -27,6 +27,7 @@ type EmailVerification struct {
 	Email     string         `gorm:"type:varchar(255);index;not null" json:"email"`
 	Code      string         `gorm:"type:varchar(8);not null" json:"code"`
 	Purpose   string         `gorm:"type:varchar(32);not null" json:"purpose"` // register | login
+	Attempts  int            `gorm:"default:0" json:"-"`                       // 错误次数，超过上限自动失效
 	ExpiresAt time.Time      `json:"expires_at"`
 	UsedAt    *time.Time     `json:"used_at,omitempty"`
 	CreatedAt time.Time      `json:"created_at"`

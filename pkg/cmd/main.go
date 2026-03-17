@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -43,6 +44,7 @@ func main() {
 	// ── Handlers ──────────────────────────────────────────────────────────
 	authHandler := handlers.NewAuthHandler(authSvc, cfg)
 	emailAuthHandler := handlers.NewEmailAuthHandler(authSvc, emailSvc, cfg)
+	adminHandler := handlers.NewAdminHandler(authSvc, redisSvc, cfg)
 	channelHandler := handlers.NewChannelHandler(channelSvcV2.ChannelService, rateLimitSvc, cfg)
 	proxyHandler := handlers.NewProxyHandler(channelSvcV2.ChannelService, rateLimitSvc, channelSvcV2)
 	oauthHandler := handlers.NewOAuthHandler(authSvc, redisSvc, cfg)
@@ -61,7 +63,8 @@ func main() {
 
 	// ── Gin 路由 ───────────────────────────────────────────────────────────
 	r := gin.Default()
-	r.LoadHTMLGlob("templates/*")
+	r.Use(handlers.CORSMiddleware(cfg)) // 全局 CORS，必须在所有路由前注册
+	r.LoadHTMLGlob("templates/*.html")
 	r.Static("/static", "./web/static")
 
 	// 页面
@@ -80,7 +83,7 @@ func main() {
 		// 无需认证
 		auth := api.Group("/auth")
 		{
-			auth.POST("/login", authHandler.Login)
+			// ⚠️ /login 已移除：OAuth 回调直接内部调用，不对外暴露 CreateOrGetUser
 			auth.GET("/wechat/qrcode", oauthHandler.WechatQRCode)
 			auth.GET("/wechat/status", oauthHandler.WechatStatus)
 			auth.GET("/google/initiate", oauthHandler.GoogleInitiate)
@@ -117,9 +120,10 @@ func main() {
 		}
 	}
 
-	// 隧道路由（本地 agent 连接 + 状态查询，无需登录认证）
+	// 隧道路由
 	r.GET("/tunnel/connect", tunnelHandler.Connect)
-	r.GET("/tunnel/status/:channel_id", tunnelHandler.Status)
+	// /tunnel/status 需要认证，防止枚举 channel 在线状态
+	r.GET("/tunnel/status/:channel_id", handlers.AuthMiddleware(authSvc), tunnelHandler.Status)
 
 	// 代理转发路由（HTTP/HTTPS/WebSocket/隧道）
 	r.Any("/proxy/:channel_id", func(c *gin.Context) {
@@ -134,7 +138,45 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "time": time.Now().Format(time.RFC3339)})
 	})
 
+	// ── 管理后台 ───────────────────────────────────────────────────────────
+	admin := r.Group("/admin")
+	{
+		// 公开页面 & OAuth
+		admin.GET("/login", adminHandler.LoginPage)
+		admin.GET("/auth/google/initiate", adminHandler.GoogleInitiate)
+		admin.GET("/auth/google/callback", adminHandler.GoogleCallback)
+		admin.GET("/logout", adminHandler.Logout)
+
+		// 需要 admin session 的页面
+		authedAdmin := admin.Group("")
+		authedAdmin.Use(handlers.AdminAuthMiddleware(redisSvc, cfg))
+		{
+			authedAdmin.GET("/dashboard", adminHandler.DashboardPage)
+
+			// Admin API
+			adminAPI := authedAdmin.Group("/api")
+			{
+				adminAPI.GET("/stats", adminHandler.GetStats)
+				adminAPI.GET("/users", adminHandler.ListUsers)
+				adminAPI.GET("/channels", adminHandler.ListChannels)
+				adminAPI.PUT("/channels/:id/toggle", adminHandler.ToggleChannel)
+				adminAPI.DELETE("/channels/:id", adminHandler.DeleteChannel)
+			}
+		}
+	}
+
 	// ── 启动服务 ───────────────────────────────────────────────────────────
+
+	// 进程重启时清除所有 channel 的残留连接计数，防止上次异常退出导致计数虚高
+	go func() {
+		var channels []models.Channel
+		if err := dbSvc.DB.Find(&channels).Error; err == nil {
+			for _, ch := range channels {
+				rateLimitSvc.ResetConnections(ch.ID)
+			}
+			log.Printf("🔄 Reset connection counters for %d channels", len(channels))
+		}
+	}()
 	addr := fmt.Sprintf(":%d", cfg.ServerPort)
 	srv := &http.Server{Addr: addr, Handler: r}
 
@@ -193,6 +235,16 @@ func loadConfig() *models.Config {
 	envStr("SMTP_USERNAME", &cfg.SMTPUsername)
 	envStr("SMTP_PASSWORD", &cfg.SMTPPassword)
 	envStr("SMTP_FROM", &cfg.SMTPFrom)
+	envStr("ADMIN_EMAIL", &cfg.AdminEmail)
+	// ALLOWED_ORIGINS: 逗号分隔，如 "https://app.example.com,https://admin.example.com"
+	if origins := os.Getenv("ALLOWED_ORIGINS"); origins != "" {
+		for _, o := range strings.Split(origins, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				cfg.AllowedOrigins = append(cfg.AllowedOrigins, o)
+			}
+		}
+	}
 
 	return &cfg
 }
