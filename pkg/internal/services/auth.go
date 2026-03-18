@@ -37,8 +37,11 @@ var (
 	ErrEmailAlreadyExists  = errors.New("email already registered")
 	ErrInvalidCredentials  = errors.New("invalid email or password")
 	ErrInvalidCode         = errors.New("invalid or expired verification code")
-	ErrCodeAlreadyUsed     = errors.New("verification code already used")
-var ErrWeakPassword = errors.New("password must be at least 8 characters")
+	ErrCodeAlreadyUsed      = errors.New("verification code already used")
+	ErrWeakPassword         = errors.New("password must be at least 8 characters")
+	ErrCodeSendTooFrequent  = errors.New("verification code sent too frequently, please wait")
+	ErrCodeTooManyAttempts  = errors.New("too many failed attempts, code has been invalidated")
+)
 
 func (s *AuthService) CreateOrGetUser(provider, providerID, email, name, avatar string) (*models.User, error) {
 	var user models.User
