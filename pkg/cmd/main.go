@@ -126,12 +126,17 @@ func main() {
 	r.GET("/tunnel/status/:channel_id", handlers.AuthMiddleware(authSvc), tunnelHandler.Status)
 
 	// 代理转发路由（HTTP/HTTPS/WebSocket/隧道）
-	r.Any("/proxy/:channel_id", func(c *gin.Context) {
+	// ⚠️  WebSocket upgrade 请求必须绕过 Gin 的响应写入逻辑：
+	//     Gin 在 handler 返回后会调用 WriteHeaderNow()，破坏已被 gorilla/websocket
+	//     hijack 的 TCP 连接。对 WS upgrade 请求调用 c.Abort() 可阻止 Gin 后续写操作。
+	proxyFunc := func(c *gin.Context) {
+		if strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
+			c.Abort() // 阻止 Gin 在 handler 返回后写入任何响应
+		}
 		proxyHandler.ServeHTTP(c.Writer, c.Request, c.Param("channel_id"))
-	})
-	r.Any("/proxy/:channel_id/*path", func(c *gin.Context) {
-		proxyHandler.ServeHTTP(c.Writer, c.Request, c.Param("channel_id"))
-	})
+	}
+	r.Any("/proxy/:channel_id", proxyFunc)
+	r.Any("/proxy/:channel_id/*path", proxyFunc)
 
 	// 健康检查
 	r.GET("/health", func(c *gin.Context) {
