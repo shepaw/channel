@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -33,17 +34,21 @@ const (
 	MsgPing     MsgType = "ping"
 	MsgPong     MsgType = "pong"
 	MsgClose    MsgType = "close"
+	MsgWsConnect MsgType = "ws_connect" // server→agent: establish WS connection to local target
+	MsgWsData    MsgType = "ws_data"    // bidirectional: transport WS frame data
+	MsgWsClose   MsgType = "ws_close"   // bidirectional: close WS connection
 )
 
 type Message struct {
-	Type     MsgType           `json:"type"`
-	StreamID int64             `json:"stream_id,omitempty"`
-	Method   string            `json:"method,omitempty"`
-	Path     string            `json:"path,omitempty"`
-	Headers  map[string]string `json:"headers,omitempty"`
-	Status   int               `json:"status,omitempty"`
-	Body     string            `json:"body,omitempty"` // base64
-	Error    string            `json:"error,omitempty"`
+	Type      MsgType           `json:"type"`
+	StreamID  int64             `json:"stream_id,omitempty"`
+	Method    string            `json:"method,omitempty"`
+	Path      string            `json:"path,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Status    int               `json:"status,omitempty"`
+	Body      string            `json:"body,omitempty"` // base64
+	Error     string            `json:"error,omitempty"`
+	WsMsgType int               `json:"ws_msg_type,omitempty"` // websocket.TextMessage=1 / BinaryMessage=2
 }
 
 // ── Agent ────────────────────────────────────────────────────────────────────
@@ -58,6 +63,10 @@ type Agent struct {
 	mu     sync.Mutex
 	closed bool
 
+	// Per-stream channels for WebSocket proxy (stream_id -> channel)
+	streams   map[int64]chan *Message
+	streamsMu sync.RWMutex
+
 	// 流量统计
 	totalRequests int64
 	totalBytes    int64
@@ -69,6 +78,7 @@ func NewAgent(server, channelID, secret, target string) *Agent {
 		channelID: channelID,
 		secret:    secret,
 		target:    target,
+		streams:   make(map[int64]chan *Message),
 	}
 }
 
@@ -164,6 +174,22 @@ func (a *Agent) loop() {
 			// 并发处理每个请求 stream
 			go a.handleRequest(&msg)
 
+		case MsgWsConnect:
+			// Start a WebSocket proxy to the local ACP Server
+			go a.handleWsProxy(&msg)
+
+		case MsgWsData, MsgWsClose:
+			// Route WS frames/close signals to the appropriate per-stream handler
+			a.streamsMu.RLock()
+			ch, ok := a.streams[msg.StreamID]
+			a.streamsMu.RUnlock()
+			if ok {
+				select {
+				case ch <- &msg:
+				default:
+				}
+			}
+
 		case MsgClose:
 			log.Printf("⚠️  Server closed the tunnel (secret may have been rotated)")
 			return
@@ -237,6 +263,102 @@ func (a *Agent) handleRequest(req *Message) {
 	// 更新统计
 	atomic.AddInt64(&a.totalRequests, 1)
 	atomic.AddInt64(&a.totalBytes, int64(len(bodyBytes)))
+}
+
+// registerStream registers a per-stream channel for WS proxy frame routing.
+func (a *Agent) registerStream(id int64, ch chan *Message) {
+	a.streamsMu.Lock()
+	a.streams[id] = ch
+	a.streamsMu.Unlock()
+}
+
+// unregisterStream removes a per-stream channel.
+func (a *Agent) unregisterStream(id int64) {
+	a.streamsMu.Lock()
+	delete(a.streams, id)
+	a.streamsMu.Unlock()
+}
+
+// handleWsProxy establishes a WebSocket connection to the local ACP Server and
+// bidirectionally forwards frames between the tunnel and the local server.
+func (a *Agent) handleWsProxy(req *Message) {
+	// Strip /proxy/{channel_id} prefix to get the real path (e.g. /acp/ws?agentId=xxx)
+	strippedPath := stripProxyPrefix(req.Path, a.channelID)
+
+	// Build target URL (convert http:// → ws://)
+	targetURL := strings.TrimRight(a.target, "/") + strippedPath
+	targetURL = strings.Replace(targetURL, "http://", "ws://", 1)
+	targetURL = strings.Replace(targetURL, "https://", "wss://", 1)
+
+	// Forward headers (including Authorization)
+	reqHeaders := http.Header{}
+	for k, v := range req.Headers {
+		reqHeaders.Set(k, v)
+	}
+
+	// Dial the local ACP Server
+	localConn, _, err := websocket.DefaultDialer.Dial(targetURL, reqHeaders)
+	if err != nil {
+		// Notify server side to clean up the stream
+		a.send(&Message{Type: MsgWsClose, StreamID: req.StreamID}) //nolint:errcheck
+		log.Printf("WS dial local failed (%s): %v", targetURL, err)
+		return
+	}
+	defer localConn.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// local → tunnel direction
+	go func() {
+		defer cancel()
+		for {
+			msgType, data, err := localConn.ReadMessage()
+			if err != nil {
+				a.send(&Message{Type: MsgWsClose, StreamID: req.StreamID}) //nolint:errcheck
+				return
+			}
+			a.send(&Message{ //nolint:errcheck
+				Type:      MsgWsData,
+				StreamID:  req.StreamID,
+				Body:      base64.StdEncoding.EncodeToString(data),
+				WsMsgType: msgType,
+			})
+		}
+	}()
+
+	// tunnel → local direction: receive via per-stream channel
+	streamCh := make(chan *Message, 64)
+	a.registerStream(req.StreamID, streamCh)
+	defer a.unregisterStream(req.StreamID)
+
+	for {
+		select {
+		case msg, ok := <-streamCh:
+			if !ok {
+				return
+			}
+			if msg.Type == MsgWsClose {
+				return
+			}
+			data, _ := base64.StdEncoding.DecodeString(msg.Body)
+			if err := localConn.WriteMessage(msg.WsMsgType, data); err != nil {
+				cancel()
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// stripProxyPrefix converts /proxy/{channelID}/acp/ws?xxx to /acp/ws?xxx
+func stripProxyPrefix(path, channelID string) string {
+	prefix := "/proxy/" + channelID
+	if strings.HasPrefix(path, prefix) {
+		return path[len(prefix):]
+	}
+	return path
 }
 
 // send 线程安全地发送消息

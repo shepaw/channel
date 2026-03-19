@@ -1,6 +1,7 @@
 package services
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -17,24 +18,28 @@ import (
 type TunnelMessageType string
 
 const (
-	TunnelMsgRequest  TunnelMessageType = "request"
-	TunnelMsgResponse TunnelMessageType = "response"
-	TunnelMsgPing     TunnelMessageType = "ping"
-	TunnelMsgPong     TunnelMessageType = "pong"
-	TunnelMsgData     TunnelMessageType = "data"
-	TunnelMsgClose    TunnelMessageType = "close"
+	TunnelMsgRequest   TunnelMessageType = "request"
+	TunnelMsgResponse  TunnelMessageType = "response"
+	TunnelMsgPing      TunnelMessageType = "ping"
+	TunnelMsgPong      TunnelMessageType = "pong"
+	TunnelMsgData      TunnelMessageType = "data"
+	TunnelMsgClose     TunnelMessageType = "close"
+	TunnelMsgWsConnect TunnelMessageType = "ws_connect" // server→agent: establish WS connection
+	TunnelMsgWsData    TunnelMessageType = "ws_data"    // bidirectional: transport WS frame data
+	TunnelMsgWsClose   TunnelMessageType = "ws_close"   // bidirectional: close WS connection
 )
 
 // TunnelMessage 隧道消息结构
 type TunnelMessage struct {
-	Type     TunnelMessageType  `json:"type"`
-	StreamID int64              `json:"stream_id,omitempty"`
-	Method   string             `json:"method,omitempty"`
-	Path     string             `json:"path,omitempty"`
-	Headers  map[string]string  `json:"headers,omitempty"`
-	Status   int                `json:"status,omitempty"`
-	Body     string             `json:"body,omitempty"` // base64 编码
-	Error    string             `json:"error,omitempty"`
+	Type      TunnelMessageType `json:"type"`
+	StreamID  int64             `json:"stream_id,omitempty"`
+	Method    string            `json:"method,omitempty"`
+	Path      string            `json:"path,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Status    int               `json:"status,omitempty"`
+	Body      string            `json:"body,omitempty"` // base64 编码
+	Error     string            `json:"error,omitempty"`
+	WsMsgType int               `json:"ws_msg_type,omitempty"` // websocket.TextMessage=1 / BinaryMessage=2
 }
 
 // TunnelConn 代表一个已连接的本地 agent
@@ -177,6 +182,78 @@ func (tm *TunnelManager) ForwardHTTP(channelID string, r *http.Request) (*Tunnel
 	}
 }
 
+// NextStreamID returns a unique stream ID for new proxy streams.
+func (tm *TunnelManager) NextStreamID() int64 {
+	return atomic.AddInt64(&globalStreamID, 1)
+}
+
+// ForwardWS proxies a WebSocket connection through the tunnel to the local agent.
+// clientConn is the already-upgraded WebSocket connection from the external caller.
+func (tm *TunnelManager) ForwardWS(channelID string, streamID int64, originalPath string, headers map[string]string, clientConn *websocket.Conn) error {
+	tc, ok := tm.Get(channelID)
+	if !ok {
+		return fmt.Errorf("channel %s 未连接隧道", channelID)
+	}
+
+	// Register a bidirectional data channel (buffered to avoid blocking agent)
+	dataCh := make(chan *TunnelMessage, 64)
+	tc.registerStream(streamID, dataCh)
+	defer tc.unregisterStream(streamID)
+
+	// Notify the agent to establish a WS connection to the local ACP Server
+	if err := tc.send(&TunnelMessage{
+		Type:     TunnelMsgWsConnect,
+		StreamID: streamID,
+		Path:     originalPath, // full path+query; agent strips /proxy/{channel_id} prefix
+		Headers:  headers,      // includes Authorization: Bearer <token>
+	}); err != nil {
+		return fmt.Errorf("发送 ws_connect 失败: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// client → agent direction
+	go func() {
+		defer cancel()
+		for {
+			msgType, data, err := clientConn.ReadMessage()
+			if err != nil {
+				tc.send(&TunnelMessage{Type: TunnelMsgWsClose, StreamID: streamID}) //nolint:errcheck
+				return
+			}
+			tc.send(&TunnelMessage{ //nolint:errcheck
+				Type:      TunnelMsgWsData,
+				StreamID:  streamID,
+				Body:      base64.StdEncoding.EncodeToString(data),
+				WsMsgType: msgType,
+			})
+		}
+	}()
+
+	// agent → client direction
+	defer clientConn.Close()
+	for {
+		select {
+		case msg, ok := <-dataCh:
+			if !ok {
+				return nil
+			}
+			if msg.Type == TunnelMsgWsClose {
+				return nil
+			}
+			data, _ := base64.StdEncoding.DecodeString(msg.Body)
+			if err := clientConn.WriteMessage(msg.WsMsgType, data); err != nil {
+				cancel()
+				return err
+			}
+		case <-ctx.Done():
+			return nil
+		case <-tc.closeCh:
+			return nil
+		}
+	}
+}
+
 // ── TunnelConn 内部方法 ────────────────────────────────────────────────────────
 
 func (tc *TunnelConn) send(msg *TunnelMessage) error {
@@ -221,6 +298,17 @@ func (tc *TunnelConn) readLoop() {
 			tc.lastPingAt = time.Now()
 
 		case TunnelMsgResponse:
+			tc.streamsMu.RLock()
+			ch, ok := tc.streams[msg.StreamID]
+			tc.streamsMu.RUnlock()
+			if ok {
+				select {
+				case ch <- &msg:
+				default:
+				}
+			}
+
+		case TunnelMsgWsData, TunnelMsgWsClose:
 			tc.streamsMu.RLock()
 			ch, ok := tc.streams[msg.StreamID]
 			tc.streamsMu.RUnlock()

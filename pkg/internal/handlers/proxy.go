@@ -11,6 +11,7 @@ import (
 
 	"github.com/edenzou/channel-service/pkg/internal/services"
 	"github.com/edenzou/channel-service/pkg/internal/services/proxy"
+	"github.com/gorilla/websocket"
 )
 
 // ProxyHandler 负责 HTTP/HTTPS/WebSocket/TCP/UDP/隧道 代理转发
@@ -294,6 +295,12 @@ func (up *UDPProxy) listen() {
 
 // handleTunnelHTTP 通过 TunnelManager 将请求下发给本地 agent，再将响应回写
 func (h *ProxyHandler) handleTunnelHTTP(w http.ResponseWriter, r *http.Request, channelID, clientIP string) {
+	// Detect WebSocket upgrade requests and handle them separately
+	if isWebSocketUpgrade(r) {
+		h.handleTunnelWS(w, r, channelID, clientIP)
+		return
+	}
+
 	if h.tunnelMgr == nil {
 		http.Error(w, "Tunnel not supported", http.StatusInternalServerError)
 		return
@@ -324,6 +331,60 @@ func (h *ProxyHandler) handleTunnelHTTP(w http.ResponseWriter, r *http.Request, 
 		if err == nil {
 			w.Write(body)
 		}
+	}
+}
+
+// isWebSocketUpgrade returns true if the request is a WebSocket upgrade request.
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+var tunnelWsUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+// handleTunnelWS upgrades the client connection and proxies the WebSocket
+// through the tunnel to the local agent.
+func (h *ProxyHandler) handleTunnelWS(w http.ResponseWriter, r *http.Request, channelID, clientIP string) {
+	if h.tunnelMgr == nil {
+		http.Error(w, "Tunnel not supported", http.StatusInternalServerError)
+		return
+	}
+	if !h.tunnelMgr.IsOnline(channelID) {
+		http.Error(w, "Local agent is offline", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Upgrade the connection with the external caller
+	clientConn, err := tunnelWsUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("WS upgrade failed for channel %s: %v", channelID, err)
+		return
+	}
+
+	// Build full path+query (passed as-is to agent; agent strips /proxy/{channel_id} prefix)
+	path := r.URL.Path
+	if r.URL.RawQuery != "" {
+		path = path + "?" + r.URL.RawQuery
+	}
+
+	// Collect headers to forward (including Authorization), skip WS handshake-only headers
+	headers := make(map[string]string)
+	for k, vs := range r.Header {
+		lk := strings.ToLower(k)
+		if lk == "upgrade" || lk == "connection" ||
+			lk == "sec-websocket-key" || lk == "sec-websocket-version" ||
+			lk == "sec-websocket-extensions" || lk == "host" {
+			continue
+		}
+		if len(vs) > 0 {
+			headers[k] = vs[0]
+		}
+	}
+
+	streamID := h.tunnelMgr.NextStreamID()
+	if err := h.tunnelMgr.ForwardWS(channelID, streamID, path, headers, clientConn); err != nil {
+		log.Printf("WS tunnel forward error for channel %s: %v", channelID, err)
 	}
 }
 
