@@ -226,7 +226,7 @@ func (c *ChannelService) UpdateChannelStats(channelID string, bytes, requests in
 func isValidChannelType(t string) bool {
 	switch t {
 	case "http", "https", "ws", "tcp", "udp",
-		"tunnel-http", "tunnel-tcp":
+		"tunnel-http", "tunnel-tcp", "tunnel-ws":
 		return true
 	}
 	return false
@@ -242,7 +242,7 @@ func generateEndpointSimple(channelType, baseDomain, channelID string) string {
 		return fmt.Sprintf("https://%s/proxy/%s", baseDomain, channelID)
 	case "ws":
 		return fmt.Sprintf("ws://%s/proxy/%s", baseDomain, channelID)
-	case "tunnel-http":
+	case "tunnel-http", "tunnel-ws":
 		return fmt.Sprintf("http://%s/proxy/%s", baseDomain, channelID)
 	case "tunnel-tcp":
 		return fmt.Sprintf("tcp://%s/channel/%s", baseDomain, channelID)

@@ -72,8 +72,8 @@ func (h *TunnelHandler) Connect(c *gin.Context) {
 	}
 
 	// channel 必须是 tunnel 类型
-	if channel.Type != "tunnel-http" && channel.Type != "tunnel-tcp" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "channel type must be tunnel-http or tunnel-tcp"})
+	if channel.Type != "tunnel-http" && channel.Type != "tunnel-tcp" && channel.Type != "tunnel-ws" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "channel type must be tunnel-http, tunnel-ws or tunnel-tcp"})
 		return
 	}
 

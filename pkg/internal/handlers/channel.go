@@ -35,7 +35,7 @@ func (h *ChannelHandler) SetV2(v2 *services.ChannelServiceV2, ph *ProxyHandler) 
 type CreateChannelRequest struct {
 	Name        string                 `json:"name"   binding:"required,max=100"`
 	Description string                 `json:"description"`
-	Type        string                 `json:"type"   binding:"required,oneof=http https ws tcp udp tunnel-http tunnel-tcp"`
+	Type        string                 `json:"type"   binding:"required,oneof=http https ws tcp udp tunnel-http tunnel-tcp tunnel-ws"`
 	Target      string                 `json:"target"`
 	Config      map[string]interface{} `json:"config"`
 }
@@ -62,7 +62,7 @@ func (h *ChannelHandler) Create(c *gin.Context) {
 	}
 
 	// tunnel 类型由 agent 端指定 target，server 端 target 可为空；其他类型必须填 target
-	isTunnel := req.Type == "tunnel-http" || req.Type == "tunnel-tcp"
+	isTunnel := req.Type == "tunnel-http" || req.Type == "tunnel-tcp" || req.Type == "tunnel-ws"
 	if !isTunnel && req.Target == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "target is required for type: " + req.Type})
 		return

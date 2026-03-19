@@ -59,7 +59,7 @@ func (h *ProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request, channel
 		h.handleWebSocket(w, r, channelID, channel.Target, clientIP)
 	case "http", "https":
 		h.handleHTTP(w, r, channelID, channel.Target, clientIP)
-	case "tunnel-http":
+	case "tunnel-http", "tunnel-ws":
 		h.handleTunnelHTTP(w, r, channelID, clientIP)
 	case "tunnel-tcp":
 		http.Error(w, "tunnel-tcp 不支持 HTTP 访问，请直接使用 TCP 客户端", http.StatusBadRequest)
