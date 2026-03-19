@@ -237,6 +237,7 @@ Authorization: Bearer &lt;your_token&gt;
                             <option value="tcp">TCP（反向代理）</option>
                             <option value="udp">UDP（反向代理）</option>
                             <option value="tunnel-http">tunnel-http（隧道模式 🔗）</option>
+                            <option value="tunnel-ws">tunnel-ws（隧道 WebSocket 🔗）</option>
                             <option value="tunnel-tcp">tunnel-tcp（隧道模式 🔗）</option>
                         </select>
                     </div>
@@ -419,7 +420,7 @@ Authorization: Bearer &lt;your_token&gt;
                                 <span class="inline-block px-2 py-0.5 rounded text-xs font-medium ${typeColor(ch.type)}">${ch.type.toUpperCase()}</span>
                                 <h3 class="font-semibold text-gray-800">${escapeHtml(ch.name)}</h3>
                                 <span class="w-2 h-2 rounded-full ${ch.is_active ? 'bg-green-500' : 'bg-gray-300'}"></span>
-                                ${(ch.type === 'tunnel-http' || ch.type === 'tunnel-tcp') ? `
+                                ${(ch.type === 'tunnel-http' || ch.type === 'tunnel-tcp' || ch.type === 'tunnel-ws') ? `
                                 <span id="tunnel-dot-${ch.id}" class="w-2 h-2 rounded-full bg-gray-300"></span>
                                 <span id="tunnel-label-${ch.id}" class="text-xs text-gray-400">检测中</span>
                                 ` : ''}
@@ -454,7 +455,7 @@ Authorization: Bearer &lt;your_token&gt;
 
             // 异步检测所有隧道 channel 的在线状态
             channels
-                .filter(ch => ch.type === 'tunnel-http' || ch.type === 'tunnel-tcp')
+                .filter(ch => ch.type === 'tunnel-http' || ch.type === 'tunnel-tcp' || ch.type === 'tunnel-ws')
                 .forEach(ch => checkTunnelStatus(ch.id));
         }
 
@@ -476,6 +477,7 @@ Authorization: Bearer &lt;your_token&gt;
                 tcp: 'bg-orange-100 text-orange-700',
                 udp: 'bg-yellow-100 text-yellow-700',
                 'tunnel-http': 'bg-indigo-100 text-indigo-700',
+                'tunnel-ws':   'bg-violet-100 text-violet-700',
                 'tunnel-tcp': 'bg-pink-100 text-pink-700',
             };
             return colors[type] || 'bg-gray-100 text-gray-700';
@@ -500,7 +502,7 @@ Authorization: Bearer &lt;your_token&gt;
             const tip = document.getElementById('tunnel-tip');
             const targetInput = document.getElementById('channel-target');
             const targetLabel = document.getElementById('target-label');
-            const isTunnel = type === 'tunnel-http' || type === 'tunnel-tcp';
+            const isTunnel = type === 'tunnel-http' || type === 'tunnel-tcp' || type === 'tunnel-ws';
             if (isTunnel) {
                 tip.classList.remove('hidden');
                 const target = targetInput.value || 'http://localhost:3000';
