@@ -242,7 +242,7 @@ Authorization: Bearer &lt;your_token&gt;
                     </div>
 
                     <div>
-                        <label class="text-sm font-medium text-gray-700 block mb-1">目标地址 *</label>
+                        <label class="text-sm font-medium text-gray-700 block mb-1" id="target-label">目标地址 *</label>
                         <input type="text" id="channel-target" required
                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                             placeholder="例：http://localhost:3000">
@@ -363,6 +363,7 @@ Authorization: Bearer &lt;your_token&gt;
 
     <script>
         let token = localStorage.getItem('access_token');
+        const API_BASE = '/api/v1';
         let channels = [];
 
         // 初始化
@@ -497,13 +498,21 @@ Authorization: Bearer &lt;your_token&gt;
 
         function onTypeChange(type) {
             const tip = document.getElementById('tunnel-tip');
-            if (type === 'tunnel-http' || type === 'tunnel-tcp') {
+            const targetInput = document.getElementById('channel-target');
+            const targetLabel = document.getElementById('target-label');
+            const isTunnel = type === 'tunnel-http' || type === 'tunnel-tcp';
+            if (isTunnel) {
                 tip.classList.remove('hidden');
-                const target = document.getElementById('channel-target').value || 'http://localhost:3000';
+                const target = targetInput.value || 'http://localhost:3000';
                 document.getElementById('tip-target').textContent = target;
                 document.getElementById('tip-server').textContent = window.location.origin;
+                // 隧道模式目标地址可选（由 agent 端指定）
+                targetInput.required = false;
+                targetLabel.textContent = '目标地址（可选，可由 agent 端指定）';
             } else {
                 tip.classList.add('hidden');
+                targetInput.required = true;
+                targetLabel.textContent = '目标地址 *';
             }
         }
 
@@ -534,7 +543,12 @@ Authorization: Bearer &lt;your_token&gt;
                     },
                     body: JSON.stringify(payload)
                 });
-                const data = await resp.json();
+                let data = {};
+                try {
+                    data = await resp.json();
+                } catch (jsonErr) {
+                    console.error('响应 JSON 解析失败:', jsonErr);
+                }
                 if (resp.ok) {
                     closeCreateModal();
                     await loadChannels();
@@ -546,10 +560,11 @@ Authorization: Bearer &lt;your_token&gt;
                         alert(`Channel 创建成功！\n访问地址：${data.endpoint}`);
                     }
                 } else {
-                    alert(`创建失败：${data.error}`);
+                    alert(`创建失败：${data.error || resp.status + ' ' + resp.statusText}`);
                 }
             } catch (err) {
-                alert('创建失败，请重试');
+                console.error('创建 Channel 请求异常:', err);
+                alert(`创建失败，请重试\n错误：${err.message}`);
             }
         }
 
