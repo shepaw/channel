@@ -121,7 +121,12 @@ func main() {
 	}
 
 	// 隧道路由
-	r.GET("/tunnel/connect", tunnelHandler.Connect)
+	// ⚠️  /tunnel/connect 也是 WebSocket upgrade 请求，同样需要 c.Abort() 阻止 Gin
+	//     在 handler 返回后调用 WriteHeaderNow()，避免破坏已被 gorilla/websocket hijack 的 TCP 连接。
+	r.GET("/tunnel/connect", func(c *gin.Context) {
+		c.Abort() // 阻止 Gin 在 handler 返回后写入任何响应
+		tunnelHandler.Connect(c)
+	})
 	// /tunnel/status 需要认证，防止枚举 channel 在线状态
 	r.GET("/tunnel/status/:channel_id", handlers.AuthMiddleware(authSvc), tunnelHandler.Status)
 
