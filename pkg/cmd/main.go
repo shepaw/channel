@@ -39,6 +39,7 @@ func main() {
 	emailSvc := services.NewEmailService(cfg)
 	channelSvcV2 := services.NewChannelServiceV2(dbSvc, redisSvc, cfg)
 	rateLimitSvc := services.NewRateLimitService(dbSvc, redisSvc)
+	appVersionSvc := services.NewAppVersionService(dbSvc.DB)
 	tunnelMgr := services.NewTunnelManager()
 
 	// ── Handlers ──────────────────────────────────────────────────────────
@@ -49,6 +50,7 @@ func main() {
 	proxyHandler := handlers.NewProxyHandler(channelSvcV2.ChannelService, rateLimitSvc, channelSvcV2)
 	oauthHandler := handlers.NewOAuthHandler(authSvc, redisSvc, cfg)
 	tunnelHandler := handlers.NewTunnelHandler(tunnelMgr, channelSvcV2.ChannelService, authSvc)
+	appVersionHandler := handlers.NewAppVersionHandler(appVersionSvc)
 
 	// 注入 TunnelManager 到 ProxyHandler
 	proxyHandler.SetTunnelManager(tunnelMgr)
@@ -97,6 +99,9 @@ func main() {
 				email.POST("/login/code", emailAuthHandler.LoginCode)
 			}
 		}
+
+		// 应用版本检查（无需认证）
+		api.GET("/check-update", appVersionHandler.CheckUpdate)
 
 		// 需要认证
 		authed := api.Group("")
@@ -162,6 +167,7 @@ func main() {
 		authedAdmin.Use(handlers.AdminAuthMiddleware(redisSvc, cfg))
 		{
 			authedAdmin.GET("/dashboard", adminHandler.DashboardPage)
+			authedAdmin.GET("/app-versions", adminHandler.AppVersionsPage)
 
 			// Admin API
 			adminAPI := authedAdmin.Group("/api")
@@ -171,6 +177,11 @@ func main() {
 				adminAPI.GET("/channels", adminHandler.ListChannels)
 				adminAPI.PUT("/channels/:id/toggle", adminHandler.ToggleChannel)
 				adminAPI.DELETE("/channels/:id", adminHandler.DeleteChannel)
+
+				// 应用版本管理
+				adminAPI.POST("/app-versions", appVersionHandler.AdminCreateVersion)
+				adminAPI.GET("/app-versions", appVersionHandler.AdminListVersions)
+				adminAPI.DELETE("/app-versions/:id", appVersionHandler.AdminDeleteVersion)
 			}
 		}
 	}

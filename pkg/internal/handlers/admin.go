@@ -48,6 +48,13 @@ func (h *AdminHandler) DashboardPage(c *gin.Context) {
 	})
 }
 
+// AppVersionsPage 应用版本管理页面
+func (h *AdminHandler) AppVersionsPage(c *gin.Context) {
+	c.HTML(http.StatusOK, "admin_app_versions.html", gin.H{
+		"AdminEmail": h.config.AdminEmail,
+	})
+}
+
 // ─── Google OAuth（Admin 专用） ───────────────────────────────────────────────
 
 // GoogleInitiate 发起 Admin Google 登录（state 加 admin: 前缀，与普通登录隔离）
