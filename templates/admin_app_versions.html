@@ -221,7 +221,7 @@
                 </div>
                 <div class="form-group">
                     <label>平台 *</label>
-                    <select id="form-platform" required>
+                    <select id="form-platform" onchange="updateFormFields()" required>
                         <option value="">-- 选择平台 --</option>
                         <option value="ios">iOS</option>
                         <option value="android">Android</option>
@@ -256,26 +256,27 @@
             </div>
 
             <!-- 最低版本要求 -->
-            <div class="mb-6">
+            <div class="mb-6" id="min-version-section">
                 <h4 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
                     <i class="fas fa-layer-group text-purple-500"></i> 最低版本要求
                 </h4>
-                <div class="form-group">
+                <div class="form-group" id="field-minIosVersion" style="display:none;">
                     <label>最低 iOS 版本（可选）</label>
                     <input type="text" id="form-minIosVersion" placeholder="14.0">
                 </div>
-                <div class="form-group">
+                <div class="form-group" id="field-minAndroidSdk" style="display:none;">
                     <label>最低 Android SDK（可选）</label>
                     <input type="number" id="form-minAndroidSdk" placeholder="21" min="0">
                 </div>
-                <div class="form-group">
+                <div class="form-group" id="field-minMacOSVersion" style="display:none;">
                     <label>最低 macOS 版本（可选）</label>
                     <input type="text" id="form-minMacOSVersion" placeholder="11.0">
                 </div>
-                <div class="form-group">
+                <div class="form-group" id="field-minWindowsVersion" style="display:none;">
                     <label>最低 Windows 版本（可选）</label>
                     <input type="text" id="form-minWindowsVersion" placeholder="10.0">
                 </div>
+                <p class="text-xs text-gray-400" id="min-version-hint">Linux 平台无最低版本要求配置</p>
             </div>
 
             <!-- 发布设置 -->
@@ -409,6 +410,7 @@
     function openCreateModal() {
         resetForm();
         document.getElementById('modal-title').textContent = '新建版本';
+        updateFormFields();
         document.getElementById('form-modal').classList.add('show');
     }
 
@@ -438,6 +440,9 @@
             document.getElementById('form-isMandatory').checked = version.isMandatory || false;
             document.getElementById('form-active').checked = version.active || false;
 
+            // 更新字段显隐
+            updateFormFields();
+
             // 设置时间
             if (version.releaseDate) {
                 const date = new Date(version.releaseDate);
@@ -460,6 +465,46 @@
         document.getElementById('form-id').value = '';
     }
 
+    // ==================== 平台字段显隐 ====================
+    function updateFormFields() {
+        const platform = document.getElementById('form-platform').value;
+
+        // 各平台对应的字段 ID
+        const platformFields = {
+            ios:     ['field-minIosVersion'],
+            android: ['field-minAndroidSdk'],
+            macos:   ['field-minMacOSVersion'],
+            windows: ['field-minWindowsVersion'],
+            linux:   [],
+        };
+
+        // 所有最低版本字段 ID
+        const allFields = ['field-minIosVersion', 'field-minAndroidSdk', 'field-minMacOSVersion', 'field-minWindowsVersion'];
+        const hint = document.getElementById('min-version-hint');
+
+        // 隐藏所有字段
+        allFields.forEach(id => {
+            document.getElementById(id).style.display = 'none';
+        });
+
+        if (!platform) {
+            hint.style.display = 'none';
+            return;
+        }
+
+        hint.style.display = 'none';
+
+        const visibleFields = platformFields[platform] || [];
+        visibleFields.forEach(id => {
+            document.getElementById(id).style.display = '';
+        });
+
+        // linux 平台无最低版本字段，显示说明
+        if (platform === 'linux') {
+            hint.style.display = '';
+        }
+    }
+
     // ==================== 表单提交 ====================
     async function handleFormSubmit(event) {
         event.preventDefault();
@@ -467,18 +512,20 @@
 
         try {
             const id = document.getElementById('form-id').value;
+            const platform = document.getElementById('form-platform').value;
             const payload = {
                 version: document.getElementById('form-version').value,
                 buildNumber: parseInt(document.getElementById('form-buildNumber').value),
-                platform: document.getElementById('form-platform').value,
+                platform,
                 description: document.getElementById('form-description').value,
                 downloadUrl: document.getElementById('form-downloadUrl').value,
                 fileSize: document.getElementById('form-fileSize').value ? parseInt(document.getElementById('form-fileSize').value) : 0,
                 checksum: document.getElementById('form-checksum').value,
-                minIosVersion: document.getElementById('form-minIosVersion').value,
-                minAndroidSdk: document.getElementById('form-minAndroidSdk').value ? parseInt(document.getElementById('form-minAndroidSdk').value) : 0,
-                minMacOSVersion: document.getElementById('form-minMacOSVersion').value,
-                minWindowsVersion: document.getElementById('form-minWindowsVersion').value,
+                // 仅提交当前平台相关的最低版本字段，其余清空
+                minIosVersion: platform === 'ios' ? document.getElementById('form-minIosVersion').value : '',
+                minAndroidSdk: platform === 'android' && document.getElementById('form-minAndroidSdk').value ? parseInt(document.getElementById('form-minAndroidSdk').value) : 0,
+                minMacOSVersion: platform === 'macos' ? document.getElementById('form-minMacOSVersion').value : '',
+                minWindowsVersion: platform === 'windows' ? document.getElementById('form-minWindowsVersion').value : '',
                 isMandatory: document.getElementById('form-isMandatory').checked,
                 active: document.getElementById('form-active').checked,
                 releaseDate: document.getElementById('form-releaseDate').value
