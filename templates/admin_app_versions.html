@@ -51,6 +51,48 @@
         .status-indicator { display: inline-block; width: 0.5rem; height: 0.5rem; border-radius: 50%; margin-right: 0.5rem; }
         .status-active { background: #10b981; }
         .status-inactive { background: #6b7280; }
+
+        /* 文件上传区域 */
+        .upload-zone {
+            border: 2px dashed #d1d5db;
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.2s, background 0.2s;
+            background: #fafafa;
+        }
+        .upload-zone:hover, .upload-zone.dragover {
+            border-color: #4f46e5;
+            background: #eef2ff;
+        }
+        .upload-zone input[type="file"] { display: none; }
+        .upload-progress-bar {
+            height: 6px;
+            border-radius: 3px;
+            background: #e5e7eb;
+            overflow: hidden;
+            margin-top: 0.75rem;
+            display: none;
+        }
+        .upload-progress-bar-inner {
+            height: 100%;
+            background: #4f46e5;
+            width: 0%;
+            transition: width 0.2s;
+        }
+        .upload-file-info {
+            display: none;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+            padding: 0.5rem 0.75rem;
+            background: #f0fdf4;
+            border: 1px solid #bbf7d0;
+            border-radius: 0.375rem;
+            font-size: 0.8rem;
+            color: #166534;
+        }
     </style>
 </head>
 <body class="bg-gray-100">
@@ -241,6 +283,34 @@
                 <h4 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
                     <i class="fas fa-download text-green-500"></i> 下载信息
                 </h4>
+
+                <!-- 文件上传区域 -->
+                <div class="form-group">
+                    <label>上传安装包（可选，上传后自动填充下方字段）</label>
+                    <div class="upload-zone" id="upload-zone"
+                         onclick="document.getElementById('upload-file-input').click()"
+                         ondragover="handleDragOver(event)"
+                         ondragleave="handleDragLeave(event)"
+                         ondrop="handleDrop(event)">
+                        <input type="file" id="upload-file-input" onchange="handleFileSelect(event)">
+                        <i class="fas fa-cloud-upload-alt text-3xl text-gray-400 mb-2"></i>
+                        <p class="text-sm text-gray-500">拖拽文件到此处，或 <span class="text-indigo-600 font-medium">点击选择文件</span></p>
+                        <p class="text-xs text-gray-400 mt-1">支持 .dmg .exe .pkg .apk .deb .rpm .AppImage 等，最大 500 MB</p>
+                    </div>
+                    <!-- 上传进度 -->
+                    <div class="upload-progress-bar" id="upload-progress-bar">
+                        <div class="upload-progress-bar-inner" id="upload-progress-inner"></div>
+                    </div>
+                    <!-- 上传成功文件信息 -->
+                    <div class="upload-file-info" id="upload-file-info">
+                        <i class="fas fa-check-circle text-green-500"></i>
+                        <span id="upload-file-name"></span>
+                        <span class="text-gray-400">·</span>
+                        <span id="upload-file-size-display"></span>
+                    </div>
+                    <p class="text-xs text-red-500 mt-1" id="upload-error" style="display:none;"></p>
+                </div>
+
                 <div class="form-group">
                     <label>下载链接 *</label>
                     <input type="url" id="form-downloadUrl" placeholder="https://release.shepaw.com/download/..." required>
@@ -463,6 +533,7 @@
     function resetForm() {
         document.getElementById('version-form').reset();
         document.getElementById('form-id').value = '';
+        resetUploadZone();
     }
 
     // ==================== 平台字段显隐 ====================
@@ -601,6 +672,140 @@
             "'": '&#039;'
         };
         return text.replace(/[&<>"']/g, m => map[m]);
+    }
+
+    // ==================== 文件上传 ====================
+
+    function resetUploadZone() {
+        document.getElementById('upload-file-input').value = '';
+        document.getElementById('upload-progress-bar').style.display = 'none';
+        document.getElementById('upload-progress-inner').style.width = '0%';
+        document.getElementById('upload-file-info').style.display = 'none';
+        document.getElementById('upload-file-name').textContent = '';
+        document.getElementById('upload-file-size-display').textContent = '';
+        const errEl = document.getElementById('upload-error');
+        errEl.style.display = 'none';
+        errEl.textContent = '';
+    }
+
+    function handleDragOver(e) {
+        e.preventDefault();
+        document.getElementById('upload-zone').classList.add('dragover');
+    }
+
+    function handleDragLeave(e) {
+        document.getElementById('upload-zone').classList.remove('dragover');
+    }
+
+    function handleDrop(e) {
+        e.preventDefault();
+        document.getElementById('upload-zone').classList.remove('dragover');
+        const files = e.dataTransfer.files;
+        if (files.length > 0) uploadFile(files[0]);
+    }
+
+    function handleFileSelect(e) {
+        const files = e.target.files;
+        if (files.length > 0) uploadFile(files[0]);
+    }
+
+    async function uploadFile(file) {
+        const platform = document.getElementById('form-platform').value || 'common';
+        const maxSize = 500 * 1024 * 1024;
+
+        // 重置状态
+        resetUploadZone();
+
+        const errEl = document.getElementById('upload-error');
+        if (file.size > maxSize) {
+            errEl.textContent = `文件过大（${formatFileSize(file.size)}），最大支持 500 MB`;
+            errEl.style.display = '';
+            return;
+        }
+
+        // 显示进度条
+        const progressBar = document.getElementById('upload-progress-bar');
+        const progressInner = document.getElementById('upload-progress-inner');
+        progressBar.style.display = '';
+        progressInner.style.width = '0%';
+
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('platform', platform);
+
+        try {
+            // 使用 XMLHttpRequest 获取上传进度
+            const result = await new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', `${API_BASE}/app-versions/upload`);
+
+                xhr.upload.addEventListener('progress', (e) => {
+                    if (e.lengthComputable) {
+                        const pct = Math.round((e.loaded / e.total) * 100);
+                        progressInner.style.width = pct + '%';
+                    }
+                });
+
+                xhr.addEventListener('load', () => {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        try {
+                            resolve(JSON.parse(xhr.responseText));
+                        } catch {
+                            reject(new Error('服务器响应格式错误'));
+                        }
+                    } else {
+                        let msg = `上传失败 (HTTP ${xhr.status})`;
+                        try {
+                            const body = JSON.parse(xhr.responseText);
+                            if (body.error) msg = body.error;
+                        } catch {}
+                        reject(new Error(msg));
+                    }
+                });
+
+                xhr.addEventListener('error', () => reject(new Error('网络错误，请重试')));
+                xhr.addEventListener('abort', () => reject(new Error('上传已取消')));
+
+                xhr.send(formData);
+            });
+
+            // 上传成功，自动回填字段
+            progressInner.style.width = '100%';
+
+            if (result.downloadUrl) {
+                document.getElementById('form-downloadUrl').value = result.downloadUrl;
+            }
+            if (result.fileSize) {
+                document.getElementById('form-fileSize').value = result.fileSize;
+            }
+            if (result.checksum) {
+                document.getElementById('form-checksum').value = result.checksum;
+            }
+
+            // 显示文件信息
+            const infoEl = document.getElementById('upload-file-info');
+            document.getElementById('upload-file-name').textContent = result.filename || file.name;
+            document.getElementById('upload-file-size-display').textContent = formatFileSize(result.fileSize || file.size);
+            infoEl.style.display = 'flex';
+            progressBar.style.display = 'none';
+
+        } catch (err) {
+            progressBar.style.display = 'none';
+            errEl.textContent = '上传失败：' + err.message;
+            errEl.style.display = '';
+        }
+    }
+
+    function formatFileSize(bytes) {
+        if (!bytes || bytes === 0) return '0 B';
+        const units = ['B', 'KB', 'MB', 'GB'];
+        let i = 0;
+        let size = bytes;
+        while (size >= 1024 && i < units.length - 1) {
+            size /= 1024;
+            i++;
+        }
+        return size.toFixed(i === 0 ? 0 : 1) + ' ' + units[i];
     }
 </script>
 

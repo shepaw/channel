@@ -1,7 +1,14 @@
 package handlers
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/edenzou/channel-service/pkg/internal/models"
 	"github.com/edenzou/channel-service/pkg/internal/services"
@@ -11,12 +18,21 @@ import (
 // AppVersionHandler 应用版本相关的处理器
 type AppVersionHandler struct {
 	appVersionSvc *services.AppVersionService
+	uploadDir     string // 本地文件存储目录，如 "uploads/versions"
+	baseURL       string // 公开访问的 Base URL，如 "https://release.shepaw.com"
 }
 
 // NewAppVersionHandler 创建应用版本处理器实例
-func NewAppVersionHandler(appVersionSvc *services.AppVersionService) *AppVersionHandler {
+// uploadDir: 本地上传目录（相对或绝对路径），留空则默认 "uploads/versions"
+// baseURL:   文件公开访问的根 URL，留空则默认为空字符串（返回相对路径）
+func NewAppVersionHandler(appVersionSvc *services.AppVersionService, uploadDir, baseURL string) *AppVersionHandler {
+	if uploadDir == "" {
+		uploadDir = "uploads/versions"
+	}
 	return &AppVersionHandler{
 		appVersionSvc: appVersionSvc,
+		uploadDir:     uploadDir,
+		baseURL:       strings.TrimRight(baseURL, "/"),
 	}
 }
 
@@ -137,4 +153,130 @@ func (h *AppVersionHandler) AdminDeleteVersion(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "version deleted"})
+}
+
+// AdminUploadVersionFile 管理员上传版本安装包（需要认证）
+//
+// POST /admin/api/app-versions/upload
+// Content-Type: multipart/form-data
+// 字段：file（安装包文件）, platform（平台名，用于子目录分类）
+//
+// Response 200:
+//
+//	{
+//	  "downloadUrl": "/uploads/versions/macos/1713600000_MyApp.dmg",
+//	  "fileSize": 52428800,
+//	  "checksum": "sha256:abc123..."
+//	}
+//
+// 限制：单文件最大 500 MB
+func (h *AppVersionHandler) AdminUploadVersionFile(c *gin.Context) {
+	const maxUploadSize = 500 << 20 // 500 MB
+
+	// 限制读取大小，防止内存耗尽
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxUploadSize)
+
+	// 解析 multipart（内存缓冲 32 MB，其余写临时文件）
+	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "文件过大或请求格式错误，单文件最大 500 MB"})
+		return
+	}
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请选择要上传的文件"})
+		return
+	}
+
+	platform := strings.TrimSpace(c.PostForm("platform"))
+	if platform == "" {
+		platform = "common"
+	}
+
+	// 校验平台值，防止路径穿越
+	validPlatforms := map[string]bool{
+		"ios": true, "android": true, "macos": true,
+		"windows": true, "linux": true, "common": true,
+	}
+	if !validPlatforms[platform] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的平台参数"})
+		return
+	}
+
+	// 确保目标目录存在
+	destDir := filepath.Join(h.uploadDir, platform)
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器存储目录创建失败"})
+		return
+	}
+
+	// 构造目标文件名：时间戳 + 原始文件名，避免冲突
+	origName := filepath.Base(fileHeader.Filename)
+	// 只保留安全字符，防止目录穿越
+	origName = sanitizeFilename(origName)
+	destName := fmt.Sprintf("%d_%s", time.Now().Unix(), origName)
+	destPath := filepath.Join(destDir, destName)
+
+	// 打开上传文件
+	src, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取上传文件失败"})
+		return
+	}
+	defer src.Close()
+
+	// 创建目标文件
+	dst, err := os.Create(destPath)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存文件失败"})
+		return
+	}
+	defer dst.Close()
+
+	// 流式写入并同时计算 SHA256
+	hash := sha256.New()
+	written, err := io.Copy(io.MultiWriter(dst, hash), src)
+	if err != nil {
+		os.Remove(destPath) // 写入失败则删除不完整文件
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "文件写入失败"})
+		return
+	}
+
+	checksum := fmt.Sprintf("sha256:%x", hash.Sum(nil))
+
+	// 构造公开访问 URL
+	// 相对路径如 /uploads/versions/macos/1713600000_MyApp.dmg
+	relPath := fmt.Sprintf("/uploads/versions/%s/%s", platform, destName)
+	downloadURL := relPath
+	if h.baseURL != "" {
+		downloadURL = h.baseURL + relPath
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"downloadUrl": downloadURL,
+		"fileSize":    written,
+		"checksum":    checksum,
+		"filename":    destName,
+	})
+}
+
+// sanitizeFilename 移除文件名中的路径分隔符和其他危险字符，只保留安全字符
+func sanitizeFilename(name string) string {
+	// 去掉路径分量
+	name = filepath.Base(name)
+	// 只保留字母、数字、连字符、下划线、点
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	result := b.String()
+	if result == "" || result == "." {
+		result = "upload"
+	}
+	return result
 }

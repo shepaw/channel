@@ -40,6 +40,11 @@ func main() {
 	channelSvcV2 := services.NewChannelServiceV2(dbSvc, redisSvc, cfg)
 	rateLimitSvc := services.NewRateLimitService(dbSvc, redisSvc)
 	appVersionSvc := services.NewAppVersionService(dbSvc.DB)
+
+	// 确保版本文件上传目录存在
+	if err := os.MkdirAll("uploads/versions", 0755); err != nil {
+		log.Printf("⚠️  Failed to create upload dir: %v", err)
+	}
 	tunnelMgr := services.NewTunnelManager()
 
 	// ── Handlers ──────────────────────────────────────────────────────────
@@ -50,7 +55,7 @@ func main() {
 	proxyHandler := handlers.NewProxyHandler(channelSvcV2.ChannelService, rateLimitSvc, channelSvcV2)
 	oauthHandler := handlers.NewOAuthHandler(authSvc, redisSvc, cfg)
 	tunnelHandler := handlers.NewTunnelHandler(tunnelMgr, channelSvcV2.ChannelService, authSvc)
-	appVersionHandler := handlers.NewAppVersionHandler(appVersionSvc)
+	appVersionHandler := handlers.NewAppVersionHandler(appVersionSvc, "uploads/versions", cfg.BaseURL)
 
 	// 注入 TunnelManager 到 ProxyHandler
 	proxyHandler.SetTunnelManager(tunnelMgr)
@@ -68,6 +73,7 @@ func main() {
 	r.Use(handlers.CORSMiddleware(cfg)) // 全局 CORS，必须在所有路由前注册
 	r.LoadHTMLGlob("templates/*.html")
 	r.Static("/static", "./web/static")
+	r.Static("/uploads", "./uploads") // 版本安装包静态文件
 
 	// 页面
 	r.GET("/", func(c *gin.Context) { c.HTML(200, "index.html", nil) })
@@ -182,6 +188,7 @@ func main() {
 				adminAPI.POST("/app-versions", appVersionHandler.AdminCreateVersion)
 				adminAPI.GET("/app-versions", appVersionHandler.AdminListVersions)
 				adminAPI.DELETE("/app-versions/:id", appVersionHandler.AdminDeleteVersion)
+				adminAPI.POST("/app-versions/upload", appVersionHandler.AdminUploadVersionFile)
 			}
 		}
 	}
