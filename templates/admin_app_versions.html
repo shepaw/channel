@@ -593,12 +593,13 @@
         try {
             const id = document.getElementById('form-id').value;
             const platform = document.getElementById('form-platform').value;
+            const rdRaw = document.getElementById('form-releaseDate').value;
             const payload = {
                 version: document.getElementById('form-version').value,
                 buildNumber: parseInt(document.getElementById('form-buildNumber').value),
                 platform,
                 description: document.getElementById('form-description').value,
-                downloadUrl: document.getElementById('form-downloadUrl').value,
+                downloadUrl: downloadUrl,
                 fileSize: document.getElementById('form-fileSize').value ? parseInt(document.getElementById('form-fileSize').value) : 0,
                 checksum: document.getElementById('form-checksum').value,
                 // 仅提交当前平台相关的最低版本字段，其余清空
@@ -608,7 +609,7 @@
                 minWindowsVersion: platform === 'windows' ? document.getElementById('form-minWindowsVersion').value : '',
                 isMandatory: document.getElementById('form-isMandatory').checked,
                 active: document.getElementById('form-active').checked,
-                releaseDate: document.getElementById('form-releaseDate').value
+                releaseDate: rdRaw ? new Date(rdRaw).toISOString() : new Date().toISOString()
             };
 
             const response = await fetch(`${API_BASE}/app-versions`, {
