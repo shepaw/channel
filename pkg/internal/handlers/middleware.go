@@ -86,3 +86,52 @@ func CORSMiddleware(cfg *models.Config) gin.HandlerFunc {
 		c.Next()
 	}
 }
+
+// DomainMiddleware 校验请求的 Host 是否在允许的域名列表中。
+// 支持通配符，例如 *.shepaw.com 匹配 api.shepaw.com、www.shepaw.com 等。
+// AllowedDomains 为空时不启用域名过滤（允许所有域名）。
+func DomainMiddleware(cfg *models.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// 未配置则跳过过滤
+		if len(cfg.AllowedDomains) == 0 {
+			c.Next()
+			return
+		}
+
+		// 从 Host header 中提取主机名（去掉端口）
+		host := c.Request.Host
+		if idx := strings.LastIndex(host, ":"); idx != -1 {
+			host = host[:idx]
+		}
+		host = strings.ToLower(strings.TrimSpace(host))
+
+		for _, pattern := range cfg.AllowedDomains {
+			pattern = strings.ToLower(strings.TrimSpace(pattern))
+			if pattern == "*" || matchDomain(pattern, host) {
+				c.Next()
+				return
+			}
+		}
+
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "Forbidden: domain not allowed"})
+	}
+}
+
+// matchDomain 判断 host 是否匹配 pattern。
+// 支持通配符 * 仅作为最左侧子域名通配符，例如:
+//   - *.shepaw.com 匹配 api.shepaw.com，但不匹配 shepaw.com 或 a.b.shepaw.com
+//   - shepaw.com 精确匹配 shepaw.com
+func matchDomain(pattern, host string) bool {
+	if !strings.HasPrefix(pattern, "*.") {
+		return pattern == host
+	}
+	// 通配符模式: *.example.com
+	suffix := pattern[1:] // 保留 ".example.com"
+	if !strings.HasSuffix(host, suffix) {
+		return false
+	}
+	// 确保通配符只匹配单层子域名，即 host 去掉 suffix 后不含 "."
+	sub := host[:len(host)-len(suffix)]
+	return len(sub) > 0 && !strings.Contains(sub, ".")
+}
+

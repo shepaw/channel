@@ -70,7 +70,8 @@ func main() {
 
 	// ── Gin 路由 ───────────────────────────────────────────────────────────
 	r := gin.Default()
-	r.Use(handlers.CORSMiddleware(cfg)) // 全局 CORS，必须在所有路由前注册
+	r.Use(handlers.DomainMiddleware(cfg)) // 全局域名过滤，需在 CORS 之前
+	r.Use(handlers.CORSMiddleware(cfg))   // 全局 CORS，必须在所有路由前注册
 	r.LoadHTMLGlob("templates/*.html")
 	r.Static("/static", "./web/static")
 	r.Static("/uploads", "./uploads") // 版本安装包静态文件
@@ -270,6 +271,16 @@ func loadConfig() *models.Config {
 			o = strings.TrimSpace(o)
 			if o != "" {
 				cfg.AllowedOrigins = append(cfg.AllowedOrigins, o)
+			}
+		}
+	}
+	// ALLOWED_DOMAINS: 逗号分隔，如 "*.shepaw.com,api.example.com"
+	// 留空则不启用域名过滤（接受所有域名）
+	if domains := os.Getenv("ALLOWED_DOMAINS"); domains != "" {
+		for _, d := range strings.Split(domains, ",") {
+			d = strings.TrimSpace(d)
+			if d != "" {
+				cfg.AllowedDomains = append(cfg.AllowedDomains, d)
 			}
 		}
 	}

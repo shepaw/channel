@@ -42,6 +42,11 @@ type Config struct {
 	// AllowedOrigins 控制 CORS 允许的来源，例如 ["https://app.example.com"]
 	// 留空表示不允许任何跨域请求；设为 ["*"] 表示允许所有来源（不建议生产环境使用）
 	AllowedOrigins []string `json:"allowed_origins"`
+	
+	// AllowedDomains 控制允许的请求域名，例如 ["*.shepaw.com", "api.example.com"]
+	// 支持通配符 (*.example.com 匹配 sub.example.com)
+	// 留空表示接受所有域名；设为 ["*"] 表示显式允许所有域名
+	AllowedDomains []string `json:"allowed_domains"`
 
 	// TCP/UDP 端口范围
 	TCPPortRangeStart int `json:"tcp_port_range_start"` // 如 10000
