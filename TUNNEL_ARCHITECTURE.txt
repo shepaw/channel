@@ -1,0 +1,313 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                  TUNNEL AGENT REGISTRATION ARCHITECTURE                     ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+┌─ LAYER 1: CLIENT SIDE ────────────────────────────────────────────────────────┐
+│                                                                               │
+│  $ channel-agent --server https://channel.example.com \                      │
+│                   --channel-id abc-123 \                                     │
+│                   --secret ch_sec_abc123... \                                │
+│                   --target http://localhost:3000                             │
+│                                                                               │
+│  ┌─ Agent (cmd/agent/main.go) ───────────────────────────────────────────┐   │
+│  │ ┌─ Run()                                                              │   │
+│  │ │  └─> Reconnection loop (exponential backoff)                        │   │
+│  │ │      2s → 4s → 8s → 16s → 32s → 60s (capped)                       │   │
+│  │ │      Resets to 2s on success                                        │   │
+│  │ │                                                                     │   │
+│  │ ├─ connect()                                                          │   │
+│  │ │  └─> Dials: /tunnel/connect?channel_id=xxx&timestamp=T&nonce=N    │   │
+│  │ │             &signature=HMAC-SHA256(secret, id\nT\nN)              │   │
+│  │ │      (WebSocket upgrade, persistent connection, secret never sent) │   │
+│  │ │                                                                     │   │
+│  │ ├─ loop()                                                             │   │
+│  │ │  ├─ MsgRequest  → handleRequest()                                  │   │
+│  │ │  │              └─> Forward to local target                        │   │
+│  │ │  ├─ MsgPing     → Send MsgPong (keepalive)                         │   │
+│  │ │  ├─ MsgWsConnect → handleWsProxy()                                 │   │
+│  │ │  │              └─> Bidirectional WS proxy                         │   │
+│  │ │  └─ MsgWsData/Close → Route to per-stream channel                  │   │
+│  │ │                                                                     │   │
+│  │ └─ Per-stream channels: map[int64]chan *Message                       │   │
+│  │    (Multiplexing multiple requests over one tunnel)                   │   │
+│  │                                                                       │   │
+│  └─ Secret: Stored locally, used only for HMAC signing ──────────────────┘   │
+│                                                                               │
+└───────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      │ WebSocket
+                                      │ GET /tunnel/connect
+                                      │ ?channel_id=abc-123
+                                      │ &timestamp=T&nonce=N
+                                      │ &signature=HMAC-SHA256(...)
+                                      ▼
+┌─ LAYER 2: HTTP HANDLER ────────────────────────────────────────────────────────┐
+│                                                                               │
+│  ┌─ TunnelHandler (pkg/internal/handlers/tunnel.go) ──────────────────────┐  │
+│  │                                                                        │  │
+│  │  Connect()                                                            │  │
+│  │  ├─ Extract timestamp, nonce, signature from query                   │  │
+│  │  ├─ Validate timestamp within ±5min window                           │  │
+│  │  ├─ Validate nonce not reused (NonceCache)                           │  │
+│  │  ├─ channelSvc.GetChannelByID(channelID)                             │  │
+│  │  │  └─> Fetch channel + stored secret                                │  │
+│  │  ├─ Verify HMAC-SHA256 signature matches                             │  │
+│  │  ├─ Verify channel.Type ∈ {tunnel-http, tunnel-tcp, tunnel-ws}       │  │
+│  │  ├─ Verify channel.IsActive == true                                  │  │
+│  │  ├─ WebSocket upgrade (gorilla/websocket)                            │  │
+│  │  └─ tunnelMgr.Register(channelID, secret, conn) CONNECTED            │  │
+│  │                                                                        │  │
+│  │  RotateSecret() [Lines 110-145]                                       │  │
+│  │  ├─ [AuthMiddleware validates user token]                            │  │
+│  │  ├─ Generate new secret                                              │  │
+│  │  ├─ Update database                                                  │  │
+│  │  ├─ tunnelMgr.KickIfSecret(channelID, oldSecret)                     │  │
+│  │  │  └─> Kicks old agent if still using old secret                    │  │
+│  │  └─> Return new secret to user                                        │  │
+│  │                                                                        │  │
+│  └────────────────────────────────────────────────────────────────────────┘  │
+│                                                                               │
+└───────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      │ Stores tunnel connection
+                                      ▼
+┌─ LAYER 3: SERVICE LAYER ─────────────────────────────────────────────────────┐
+│                                                                              │
+│  ┌─ TunnelManager (pkg/internal/services/tunnel.go) ──────────────────────┐ │
+│  │                                                                       │ │
+│  │  Data Structure:                                                   │ │
+│  │  ┌─────────────────────────────────────────────────────────────┐  │ │
+│  │  │ tunnels: sync.Map (channel_id → TunnelConn)                │  │ │
+│  │  │                                                             │  │ │
+│  │  │ ENFORCES: Only ONE tunnel per channel                      │  │ │
+│  │  │          (New agent evicts old agent)                      │  │ │
+│  │  │                                                             │  │ │
+│  │  │ TunnelConn {                                               │  │ │
+│  │  │   channelID: "abc-123"                                    │  │ │
+│  │  │   secret: "ch_sec_abc123..."  ← Stored for rotation check │  │ │
+│  │  │   conn: *websocket.Conn                                   │  │ │
+│  │  │   streams: map[int64]chan *TunnelMessage                  │  │ │
+│  │  │   lastPingAt: time.Time                                   │  │ │
+│  │  │   readLoop() goroutine  ─→ Processes incoming messages    │  │ │
+│  │  │   pingLoop() goroutine  ─→ Sends ping every 20s           │  │ │
+│  │  │                             (Timeout: 60s no pong)         │  │ │
+│  │  │ }                                                           │  │ │
+│  │  │                                                             │  │ │
+│  │  └─────────────────────────────────────────────────────────────┘  │ │
+│  │                                                                       │ │
+│  │  Public Methods:                                                     │ │
+│  │  ├─ Register(channelID, secret, conn)                               │ │
+│  │  │  └─> Creates TunnelConn, evicts old, starts loops                │ │
+│  │  │                                                                   │ │
+│  │  ├─ Get(channelID)                                                  │ │
+│  │  │  └─> Returns TunnelConn if exists                                │ │
+│  │  │                                                                   │ │
+│  │  ├─ IsOnline(channelID)                                             │ │
+│  │  │  └─> Checks if tunnel in map                                     │ │
+│  │  │                                                                   │ │
+│  │  ├─ KickIfSecret(channelID, oldSecret)                              │ │
+│  │  │  └─> Closes if current tunnel.secret == oldSecret                │ │
+│  │  │      (Used by secret rotation)                                   │ │
+│  │  │                                                                   │ │
+│  │  ├─ ForwardHTTP(channelID, *http.Request) → *TunnelMessage          │ │
+│  │  │  └─> Sends MsgRequest, waits for MsgResponse (30s timeout)       │ │
+│  │  │      Uses per-stream channels for request/response pairing       │ │
+│  │  │                                                                   │ │
+│  │  └─ ForwardWS(channelID, streamID, path, headers, clientConn)       │ │
+│  │     └─> Bidirectional WebSocket proxy via stream channels           │ │
+│  │                                                                       │ │
+│  │  Message Flow:                                                       │ │
+│  │  ┌──────────────────────────────────────────────────────────────┐  │ │
+│  │  │ readLoop()                                                   │  │ │
+│  │  │ └─> json.Unmarshal from WebSocket                           │  │ │
+│  │  │     ├─ MsgPong: Update lastPingAt                           │  │ │
+│  │  │     ├─ MsgResponse: Send to stream[streamID]                │  │ │
+│  │  │     └─ MsgWsData/Close: Send to stream[streamID]            │  │ │
+│  │  │                                                              │  │ │
+│  │  │ pingLoop()                                                   │  │ │
+│  │  │ └─> Every 20s: Send MsgPing                                │  │ │
+│  │  │     If no pong for 60s: close connection                   │  │ │
+│  │  │                                                              │  │ │
+│  │  └──────────────────────────────────────────────────────────────┘  │ │
+│  │                                                                       │ │
+│  └───────────────────────────────────────────────────────────────────────┘ │
+│                                                                              │
+│  ┌─ ChannelService (pkg/internal/services/channel.go) ──────────────────┐  │
+│  │                                                                       │  │
+│  │  generateChannelSecret() [Lines 258-263]                             │  │
+│  │  └─> rand.Read(16 bytes) → hex encode → "ch_sec_" + 32hex          │  │
+│  │      128 bits of entropy                                             │  │
+│  │                                                                       │  │
+│  │  GetChannelBySecret(secret) [Lines 265-272]                          │  │
+│  │  └─> DB.Where("secret = ?", secret).First()                         │  │
+│  │      Indexed lookup ✓                                                │  │
+│  │                                                                       │  │
+│  │  RotateSecret(userID, channelID) [Lines 274-288]                     │  │
+│  │  ├─> Verify ownership (IsOwner check)                               │  │
+│  │  ├─> Generate newSecret                                             │  │
+│  │  ├─> Update in database                                             │  │
+│  │  └─> Clear Redis cache                                              │  │
+│  │                                                                       │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+                                      │
+                                      │ Queries/Updates
+                                      ▼
+┌─ LAYER 4: DATA LAYER ──────────────────────────────────────────────────────────┐
+│                                                                               │
+│  ┌─ Database (pkg/internal/services/database.go) ─────────────────────────┐  │
+│  │                                                                       │  │
+│  │  Channels table (auto-migrated):                                    │  │
+│  │  ┌──────────────────────────────────────────────────────────────┐  │  │
+│  │  │ id (PK): UUID                                              │  │  │
+│  │  │ name: string                                               │  │  │
+│  │  │ type: tunnel-http | tunnel-tcp | tunnel-ws                │  │  │
+│  │  │ secret: varchar(64) [INDEXED] ← Lookup key               │  │  │
+│  │  │ is_active: bool                                            │  │  │
+│  │  │ target: string (optional, set by agent)                   │  │  │
+│  │  │ created_at, updated_at                                    │  │  │
+│  │  │ deleted_at (soft delete)                                  │  │  │
+│  │  │                                                             │  │  │
+│  │  │ Example Row:                                               │  │  │
+│  │  │ ┌─────────────────────────────────────────────────────┐  │  │  │
+│  │  │ │ id: "abc-123-def"                                 │  │  │  │
+│  │  │ │ secret: "ch_sec_a1b2c3d4e5f6g7h8..."             │  │  │  │
+│  │  │ │ type: "tunnel-http"                               │  │  │  │
+│  │  │ │ is_active: true                                   │  │  │  │
+│  │  │ └─────────────────────────────────────────────────────┘  │  │  │
+│  │  │                                                             │  │  │
+│  │  └──────────────────────────────────────────────────────────┘  │  │
+│  │                                                                       │  │
+│  │  UserChannel table (ownership):                                    │  │
+│  │  ┌──────────────────────────────────────────────────────────────┐  │  │
+│  │  │ user_id: UUID                                              │  │  │
+│  │  │ channel_id: UUID (FK → Channels.id)                        │  │  │
+│  │  │ (Indexed for fast ownership verification)                  │  │  │
+│  │  │                                                             │  │  │
+│  │  └──────────────────────────────────────────────────────────┘  │  │
+│  │                                                                       │  │
+│  │  AccessToken table (user authentication):                          │  │
+│  │  ┌──────────────────────────────────────────────────────────────┐  │  │
+│  │  │ token: SHA256 hash (NOT plaintext)                          │  │  │
+│  │  │ expires_at: timestamp                                       │  │  │
+│  │  │ user_id: UUID (FK)                                          │  │  │
+│  │  │                                                             │  │  │
+│  │  └──────────────────────────────────────────────────────────┘  │  │
+│  │                                                                       │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                               │
+│  ┌─ Redis Cache (Optional) ───────────────────────────────────────────────┐  │
+│  │                                                                       │  │
+│  │  channel:abc-123 → { json serialized Channel struct }               │  │
+│  │  token:hash → userID (TTL: 15 minutes)                              │  │
+│  │                                                                       │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                                                               │
+└───────────────────────────────────────────────────────────────────────────────┘
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                          MESSAGE PROTOCOL FLOW                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Client Request
+     │
+     ▼
+┌─────────────────────────┐
+│ Incoming HTTP Request   │
+│ GET /proxy/abc-123/api  │
+└─────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│ ProxyHandler (HTTP proxy layer)      │
+│ ├─ Get tunnel from manager           │
+│ └─ tunnelMgr.ForwardHTTP(...)        │
+└──────────────────────────────────────┘
+     │
+     ├─ Allocate streamID: 12345
+     ├─ Create response channel
+     ├─ Build TunnelMessage
+     │  {
+     │    type: "request",
+     │    stream_id: 12345,
+     │    method: "GET",
+     │    path: "/api",
+     │    headers: {...},
+     │    body: "base64encoded"
+     │  }
+     │
+     └─ Send over WebSocket (json.Marshal)
+     │
+     ▼
+┌──────────────────────────────────────┐
+│ Agent (cmd/agent/main.go)            │
+│ ├─ loop() receives json message      │
+│ └─ handleRequest() unmarshals        │
+└──────────────────────────────────────┘
+     │
+     ├─ Decode base64 body
+     ├─ Build local target URL
+     ├─ Forward to http://localhost:3000/api
+     ├─ Read response
+     │
+     └─ Send TunnelMessage response
+        {
+          type: "response",
+          stream_id: 12345,
+          status: 200,
+          headers: {...},
+          body: "base64encoded"
+        }
+     │
+     ▼
+┌──────────────────────────────────────┐
+│ TunnelManager (readLoop goroutine)   │
+│ ├─ Receives json message             │
+│ ├─ stream[12345] channel exists      │
+│ └─ Send message to channel           │
+└──────────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│ ForwardHTTP() waiting on channel     │
+│ ├─ Receives response message         │
+│ ├─ Decodes body                      │
+│ └─ Returns to HTTP handler           │
+└──────────────────────────────────────┘
+     │
+     ▼
+┌──────────────────────────────────────┐
+│ ProxyHandler                         │
+│ ├─ Write HTTP response headers       │
+│ ├─ Write body                        │
+│ └─ Return to client                  │
+└──────────────────────────────────────┘
+     │
+     ▼
+  Client Response
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                       SECURITY CONTROLS MATRIX                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+Check                          | Location                 | Enforced | Notes
+───────────────────────────────┼──────────────────────────┼──────────┼─────────────
+HMAC-SHA256 signature          | tunnel.go:87             | ✓ YES    | Secret never transmitted
+Timestamp window (±5min)       | tunnel.go:62             | ✓ YES    | Anti-replay
+Nonce uniqueness               | tunnel.go:68             | ✓ YES    | Anti-replay (NonceCache)
+Channel type validation        | tunnel.go:93             | ✓ YES    | tunnel-* only
+Active status check            | tunnel.go:99             | ✓ YES    | is_active == true
+Owner verification (rotate)    | tunnel.go:131            | ✓ YES    | User token auth
+Secret format on generation    | channel.go:262           | ✓ YES    | ch_sec_ prefix
+Single tunnel per channel      | tunnel.go (Register)     | ✓ YES    | LoadAndDelete
+Secret rotation invalidation   | tunnel.go (KickIfSecret) | ✓ YES    | KickIfSecret()
+WebSocket protocol             | All                      | ✓ WSS    | TLS encrypted
+HTTP transmission              | All                      | ✓ HTTPS  | TLS encrypted
+───────────────────────────────┼──────────────────────────┼──────────┼─────────────
+Rate limiting                  | None                     | ✗ NO     | Gap
+Brute-force protection         | None                     | ✗ NO     | Gap
+Secret auto-rotation           | None                     | ✗ NO     | Gap
+Connection logging             | None                     | ✗ NO     | Gap
+Mutual TLS authentication      | None                     | ✗ NO     | Gap
+
