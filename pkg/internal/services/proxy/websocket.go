@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/edenzou/channel-service/pkg/internal/services"
 	"github.com/gorilla/websocket"
@@ -51,7 +52,14 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request, chan
 	targetConn, _, err := websocket.DefaultDialer.Dial(targetAddr, nil)
 	if err != nil {
 		log.Printf("WS dial target error: %v", err)
-		clientConn.WriteMessage(websocket.CloseMessage, []byte(fmt.Sprintf("Cannot reach target: %v", err)))
+		_ = clientConn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(
+				websocket.CloseInternalServerErr,
+				fmt.Sprintf("Cannot reach target: %v", err),
+			),
+			time.Now().Add(2*time.Second),
+		)
 		return
 	}
 	defer targetConn.Close()
@@ -60,22 +68,43 @@ func (w *WebSocketProxy) ServeHTTP(rw http.ResponseWriter, r *http.Request, chan
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	// sendClose 写一个标准 WebSocket Close 帧。
+	// relay 一端结束时必须把 Close 信号显式送到对端，
+	// 否则 app 端只能感知到 TCP 断开（1006 abnormal closure），
+	// 带确认按钮的流式消息会停在"加载中"，按钮无法点击。
+	sendClose := func(c *websocket.Conn, code int, reason string) {
+		_ = c.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(code, reason),
+			time.Now().Add(2*time.Second),
+		)
+	}
+
 	relay := func(src, dst *websocket.Conn, label string) {
 		defer wg.Done()
 		for {
 			mt, msg, err := src.ReadMessage()
 			if err != nil {
+				// src 已断开：告诉 dst 正常关闭，让 dst 侧的 client 能完成流。
+				if ce, ok := err.(*websocket.CloseError); ok {
+					sendClose(dst, ce.Code, ce.Text)
+				} else {
+					sendClose(dst, websocket.CloseNormalClosure, "")
+				}
 				return
 			}
 			totalBytes += int64(len(msg))
 
 			// Bandwidth check (best-effort; drop if exceeded)
 			if ok, _, _ := rateLimitSvc.CheckBandwidth(channelID, clientIP, int64(len(msg))); !ok {
-				src.WriteMessage(websocket.CloseMessage, []byte("bandwidth limit exceeded"))
+				sendClose(src, websocket.ClosePolicyViolation, "bandwidth limit exceeded")
+				sendClose(dst, websocket.ClosePolicyViolation, "bandwidth limit exceeded")
 				return
 			}
 
 			if err := dst.WriteMessage(mt, msg); err != nil {
+				// 写失败也要把信号回送给 src，避免对端长连接一直挂着。
+				sendClose(src, websocket.CloseInternalServerErr, "peer write failed")
 				return
 			}
 		}

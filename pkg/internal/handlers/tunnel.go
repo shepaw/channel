@@ -1,9 +1,9 @@
 package handlers
 
 import (
+	"fmt"
 	"log"
 	"net/http"
-	"strings"
 
 	"github.com/edenzou/channel-service/pkg/internal/services"
 	"github.com/gin-gonic/gin"
@@ -15,6 +15,7 @@ type TunnelHandler struct {
 	tunnelMgr  *services.TunnelManager
 	channelSvc *services.ChannelService
 	authSvc    *services.AuthService
+	nonces     *services.NonceCache // 防重放 nonce 缓存
 }
 
 func NewTunnelHandler(tunnelMgr *services.TunnelManager, channelSvc *services.ChannelService, authSvc *services.AuthService) *TunnelHandler {
@@ -22,6 +23,7 @@ func NewTunnelHandler(tunnelMgr *services.TunnelManager, channelSvc *services.Ch
 		tunnelMgr:  tunnelMgr,
 		channelSvc: channelSvc,
 		authSvc:    authSvc,
+		nonces:     services.NewNonceCache(),
 	}
 }
 
@@ -33,8 +35,12 @@ var tunnelUpgrader = websocket.Upgrader{
 }
 
 // Connect 本地 agent 调用此接口建立隧道 WebSocket 连接
-// GET /tunnel/connect?channel_id=xxx&secret=ch_sec_xxx
-// 认证方式：channel_secret（永久密钥，不依赖临时 token）
+// GET /tunnel/connect?channel_id=xxx&timestamp=xxx&nonce=xxx&signature=xxx
+// 认证方式：HMAC-SHA256 签名（密钥永远不在请求中传输）
+//
+// 签名计算方式:
+//   signing_string = "{channel_id}\n{timestamp}\n{nonce}"
+//   signature = HMAC-SHA256(channel_secret, signing_string)
 func (h *TunnelHandler) Connect(c *gin.Context) {
 	channelID := c.Query("channel_id")
 	if channelID == "" {
@@ -42,32 +48,44 @@ func (h *TunnelHandler) Connect(c *gin.Context) {
 		return
 	}
 
-	// 支持 query param secret= 或 Authorization: Bearer ch_sec_xxx
-	secret := c.Query("secret")
-	if secret == "" {
-		secret = extractBearerToken(c.Request)
-	}
-	if secret == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "channel secret is required (use ?secret=ch_sec_xxx or Authorization: Bearer)"})
+	// 提取签名参数
+	timestamp := c.Query("timestamp")
+	nonce := c.Query("nonce")
+	signature := c.Query("signature")
+
+	if timestamp == "" || nonce == "" || signature == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "signature auth required: timestamp, nonce, signature params are required"})
 		return
 	}
 
-	// 必须以 ch_sec_ 开头，避免误用 user token
-	if !strings.HasPrefix(secret, "ch_sec_") {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid secret format, must be a channel secret (ch_sec_...)"})
+	// 1. 校验时间戳在合理范围内（±5 分钟），防止重放
+	if err := services.ValidateTimestamp(timestamp); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("timestamp validation failed: %v", err)})
 		return
 	}
 
-	// 通过 secret 查找 channel（直接验证归属，无需额外 token）
-	channel, err := h.channelSvc.GetChannelBySecret(secret)
+	// 2. 校验 nonce 未被使用过（防止同一窗口内重放）
+	if !h.nonces.CheckAndStore(nonce) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "nonce already used (possible replay attack)"})
+		return
+	}
+
+	// 3. 通过 channel_id 查找 channel，获取服务端存储的 secret
+	channel, err := h.channelSvc.GetChannelByID(channelID)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid channel secret"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "channel not found"})
 		return
 	}
 
-	// 二次确认：channel_id 和 secret 必须匹配（防止 secret 被用于其他 channel）
-	if channel.ID != channelID {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "channel_id and secret do not match"})
+	// channel 必须有 secret（tunnel 类型）
+	if channel.Secret == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "channel has no secret configured"})
+		return
+	}
+
+	// 4. 使用服务端存储的 secret 验证签名
+	if !services.VerifySignature(channel.Secret, channelID, timestamp, nonce, signature) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid signature"})
 		return
 	}
 
@@ -90,10 +108,11 @@ func (h *TunnelHandler) Connect(c *gin.Context) {
 		return
 	}
 
-	log.Printf("✅ Tunnel connected: channel=%s type=%s", channelID, channel.Type)
+	log.Printf("✅ Tunnel connected: channel=%s type=%s (signature auth)", channelID, channel.Type)
 
 	// 注册到 TunnelManager（自动踢掉旧连接）
-	h.tunnelMgr.Register(channelID, secret, conn)
+	// 注意：这里传入 channel.Secret 用于后续 rotate 时踢出旧连接
+	h.tunnelMgr.Register(channelID, channel.Secret, conn)
 }
 
 // Status 查询指定 channel 的隧道是否在线（无需认证，公开接口）
@@ -144,11 +163,3 @@ func (h *TunnelHandler) RotateSecret(c *gin.Context) {
 	})
 }
 
-// extractBearerToken 从 Authorization header 提取 Bearer token
-func extractBearerToken(r *http.Request) string {
-	auth := r.Header.Get("Authorization")
-	if len(auth) > 7 && auth[:7] == "Bearer " {
-		return auth[7:]
-	}
-	return ""
-}

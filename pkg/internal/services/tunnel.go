@@ -232,23 +232,38 @@ func (tm *TunnelManager) ForwardWS(channelID string, streamID int64, originalPat
 
 	// agent → client direction
 	defer clientConn.Close()
+	// sendClose 向 client 端发送一个标准 WebSocket Close 帧。
+	// 必须显式下发，否则对端只能感知到 TCP 断开（1006 abnormal closure），
+	// 前端把这种情况当作"流仍在进行"，导致确认/审批组件的按钮无法点击。
+	sendClose := func(code int, reason string) {
+		_ = clientConn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(code, reason),
+			time.Now().Add(2*time.Second),
+		)
+	}
 	for {
 		select {
 		case msg, ok := <-dataCh:
 			if !ok {
+				sendClose(websocket.CloseNormalClosure, "")
 				return nil
 			}
 			if msg.Type == TunnelMsgWsClose {
+				sendClose(websocket.CloseNormalClosure, "")
 				return nil
 			}
 			data, _ := base64.StdEncoding.DecodeString(msg.Body)
 			if err := clientConn.WriteMessage(msg.WsMsgType, data); err != nil {
 				cancel()
+				sendClose(websocket.CloseInternalServerErr, "write failed")
 				return err
 			}
 		case <-ctx.Done():
+			sendClose(websocket.CloseNormalClosure, "")
 			return nil
 		case <-tc.closeCh:
+			sendClose(websocket.CloseGoingAway, "tunnel closed")
 			return nil
 		}
 	}
@@ -312,10 +327,24 @@ func (tc *TunnelConn) readLoop() {
 			tc.streamsMu.RLock()
 			ch, ok := tc.streams[msg.StreamID]
 			tc.streamsMu.RUnlock()
-			if ok {
+			if !ok {
+				continue
+			}
+			// Close 帧必须送达，否则 client 端的流式消息（例如确认/审批卡片）
+			// 会停在"加载中"状态，按钮无法点击。这里采用阻塞发送 + closeCh 逃生，
+			// 避免像 Data 帧那样被 default 分支静默丢弃。
+			if msg.Type == TunnelMsgWsClose {
+				select {
+				case ch <- &msg:
+				case <-tc.closeCh:
+					return
+				}
+			} else {
 				select {
 				case ch <- &msg:
 				default:
+					// Data 帧在消费者严重落后时仍可能被丢弃——这是已知的独立问题，
+					// 本次修复只保证 Close 帧的送达。
 				}
 			}
 		}

@@ -5,7 +5,11 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -15,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -112,7 +117,7 @@ func (a *Agent) Run() {
 	}
 }
 
-// connect 建立 WebSocket 连接，用 channel secret 认证
+// connect 建立 WebSocket 连接，使用 HMAC-SHA256 签名认证（密钥不上线）
 func (a *Agent) connect() error {
 	// 构建 WebSocket URL
 	base := strings.TrimRight(a.server, "/")
@@ -123,9 +128,17 @@ func (a *Agent) connect() error {
 	if err != nil {
 		return fmt.Errorf("invalid server URL: %v", err)
 	}
+
+	// 生成签名参数
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	nonce := generateNonce()
+	signature := computeSignature(a.secret, a.channelID, timestamp, nonce)
+
 	q := u.Query()
 	q.Set("channel_id", a.channelID)
-	q.Set("secret", a.secret) // 使用永久 channel secret，不用临时 token
+	q.Set("timestamp", timestamp)
+	q.Set("nonce", nonce)
+	q.Set("signature", signature) // 只传签名，不传 secret
 	u.RawQuery = q.Encode()
 
 	dialer := websocket.Dialer{
@@ -141,6 +154,22 @@ func (a *Agent) connect() error {
 	a.conn = conn
 	a.mu.Unlock()
 	return nil
+}
+
+// computeSignature 使用 HMAC-SHA256 计算签名（与服务端一致）
+// signingString 格式: "{channel_id}\n{timestamp}\n{nonce}"
+func computeSignature(secret, channelID, timestamp, nonce string) string {
+	signingString := fmt.Sprintf("%s\n%s\n%s", channelID, timestamp, nonce)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(signingString))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// generateNonce 生成一个随机 nonce
+func generateNonce() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // loop 主消息循环
