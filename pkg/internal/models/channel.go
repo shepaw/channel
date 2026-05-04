@@ -75,6 +75,13 @@ type Channel struct {
 	Type        string         `json:"type"`     // http | https | ws | tcp | udp | tunnel-http | tunnel-tcp | tunnel-ws
 	Target      string         `json:"target"`   // 目标地址，如 http://127.0.0.1:3000
 	Endpoint    string         `gorm:"uniqueIndex;not null" json:"endpoint"` // 分配的公开地址
+	// Alias: optional short-name slug that lets clients reach the channel via
+	// `/c/<alias>/...` instead of `/proxy/<id>/...`. Claimed at tunnel-connect
+	// time by passing `&endpoint=<alias>` in the handshake URL; see
+	// ChannelService.ClaimAlias. Unique across non-deleted channels; empty
+	// string means no alias is claimed (multiple NULLs are allowed by both
+	// Postgres and SQLite under a unique index).
+	Alias       string         `gorm:"uniqueIndex;default:null" json:"alias,omitempty"`
 	Secret      string         `gorm:"type:varchar(64);index" json:"secret,omitempty"` // tunnel channel 专用密钥
 	IsActive    bool           `json:"is_active"`
 	Config      JSONMap        `gorm:"type:text"    json:"config"`

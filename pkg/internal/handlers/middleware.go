@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/edenzou/channel-service/pkg/internal/models"
@@ -9,9 +11,35 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// AuthMiddleware validates access tokens
+// devSkipAuthUserID 是 DEV_SKIP_AUTH 模式下默认使用的 user_id
+const devSkipAuthUserID = "dev-user-local"
+
+// AuthMiddleware validates access tokens.
+//
+// 开发调试模式（仅本地使用，生产环境严禁开启）：
+//
+//	DEV_SKIP_AUTH=1              跳过 token 验证，使用默认 user_id "dev-user-local"
+//	DEV_SKIP_AUTH=1 DEV_USER_ID=xxx  跳过验证，并指定自定义 user_id
 func AuthMiddleware(authSvc *services.AuthService) gin.HandlerFunc {
+	// 启动时检查一次，避免每次请求都读取环境变量
+	devSkip := os.Getenv("DEV_SKIP_AUTH") == "1"
+	devUserID := os.Getenv("DEV_USER_ID")
+	if devUserID == "" {
+		devUserID = devSkipAuthUserID
+	}
+
+	if devSkip {
+		log.Printf("⚠️  DEV_SKIP_AUTH=1: auth middleware is DISABLED (user_id=%s). DO NOT use in production!", devUserID)
+	}
+
 	return func(c *gin.Context) {
+		if devSkip {
+			c.Set("user_id", devUserID)
+			c.Set("user_email", "dev@local.test")
+			c.Next()
+			return
+		}
+
 		token := c.GetHeader("Authorization")
 		if token == "" {
 			token = c.Query("access_token")

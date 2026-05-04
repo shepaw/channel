@@ -101,6 +101,21 @@ func (h *TunnelHandler) Connect(c *gin.Context) {
 		return
 	}
 
+	// Optional short-name alias: agents that want to be reachable at
+	// `/c/<alias>/...` instead of `/proxy/<channel_id>/...` pass
+	// `&endpoint=<alias>` on the handshake URL. Claim is idempotent —
+	// reconnecting with the same alias is fine — but a different channel
+	// trying to steal a claimed alias is refused with 409 so the operator
+	// sees the collision in the agent logs.
+	if alias := c.Query("endpoint"); alias != "" {
+		if err := h.channelSvc.ClaimAlias(channelID, alias); err != nil {
+			log.Printf("⚠️  Alias claim failed: channel=%s alias=%q err=%v", channelID, alias, err)
+			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("alias claim failed: %v", err)})
+			return
+		}
+		log.Printf("🔗 Channel %s bound alias %q", channelID, alias)
+	}
+
 	// WebSocket 升级
 	conn, err := tunnelUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {

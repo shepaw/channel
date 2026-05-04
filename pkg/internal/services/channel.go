@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,9 +33,11 @@ var (
 	ErrInvalidChannelType  = errors.New("invalid channel type")
 	ErrChannelNotFound     = errors.New("channel not found")
 	ErrNotChannelOwner     = errors.New("user does not own this channel")
+	ErrAliasDuplicated     = errors.New("alias already exists")
+	ErrInvalidAlias        = errors.New("invalid alias format")
 )
 
-func (c *ChannelService) CreateChannel(userID, name, description, channelType, target string, config map[string]interface{}) (*models.Channel, error) {
+func (c *ChannelService) CreateChannel(userID, name, description, channelType, target, alias string, config map[string]interface{}) (*models.Channel, error) {
 	var count int64
 	if err := c.db.DB.Model(&models.UserChannel{}).
 		Where("user_id = ? AND deleted_at IS NULL", userID).
@@ -48,6 +51,20 @@ func (c *ChannelService) CreateChannel(userID, name, description, channelType, t
 
 	if !isValidChannelType(channelType) {
 		return nil, ErrInvalidChannelType
+	}
+
+	// 创建时预检查 alias 格式和唯一性
+	if alias != "" {
+		if err := validateAlias(alias); err != nil {
+			return nil, ErrInvalidAlias
+		}
+		var existing models.Channel
+		err := c.db.DB.Where("alias = ? AND deleted_at IS NULL", alias).First(&existing).Error
+		if err == nil {
+			return nil, ErrAliasDuplicated
+		} else if err != gorm.ErrRecordNotFound {
+			return nil, err
+		}
 	}
 
 	channelID := uuid.New().String()
@@ -65,6 +82,7 @@ func (c *ChannelService) CreateChannel(userID, name, description, channelType, t
 		Description: description,
 		Type:        channelType,
 		Target:      target,
+		Alias:       alias,
 		Endpoint:    endpoint,
 		Secret:      secret,
 		IsActive:    true,
@@ -126,6 +144,91 @@ func (c *ChannelService) GetChannelByID(channelID string) (*models.Channel, erro
 	return &channel, nil
 }
 
+// aliasRegex matches a DNS-label-like slug: 1–64 chars, lowercase alnum and
+// hyphens, may not start or end with a hyphen. Kept conservative so aliases
+// never need URL-encoding when embedded in `/c/<alias>/...`.
+var aliasRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$`)
+
+func validateAlias(alias string) error {
+	if !aliasRegex.MatchString(alias) {
+		return fmt.Errorf("invalid alias %q: must match %s", alias, aliasRegex.String())
+	}
+	return nil
+}
+
+// GetChannelByAlias resolves a user-friendly alias (set via ClaimAlias) to the
+// channel record. Mirrors GetChannelByID's Redis+DB caching pattern; uses a
+// separate cache-key namespace so we don't collide with the id lookup.
+func (c *ChannelService) GetChannelByAlias(alias string) (*models.Channel, error) {
+	if alias == "" {
+		return nil, ErrChannelNotFound
+	}
+	cacheKey := fmt.Sprintf("channel:alias:%s", alias)
+	var channel models.Channel
+	if err := c.redis.GetStruct(cacheKey, &channel); err == nil {
+		return &channel, nil
+	}
+
+	if err := c.db.DB.Where("alias = ? AND deleted_at IS NULL", alias).First(&channel).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, ErrChannelNotFound
+		}
+		return nil, err
+	}
+
+	c.redis.Set(cacheKey, channel, 24*time.Hour)
+	return &channel, nil
+}
+
+// ClaimAlias binds `alias` to `channelID`. Idempotent: a channel reclaiming
+// its own alias is a no-op; claiming an alias owned by a different channel
+// returns an error so the caller can surface HTTP 409. Called from
+// TunnelHandler.Connect whenever the agent passes `&endpoint=<alias>`.
+//
+// Note: we intentionally do NOT release a previously-held alias on conflict.
+// The alias is sticky to its first claimant until the channel is deleted,
+// matching how Endpoint works today (also unique, also tied to a channel's
+// lifetime).
+func (c *ChannelService) ClaimAlias(channelID, alias string) error {
+	if err := validateAlias(alias); err != nil {
+		return err
+	}
+
+	var existing models.Channel
+	err := c.db.DB.Where("alias = ? AND deleted_at IS NULL", alias).First(&existing).Error
+	switch {
+	case err == nil && existing.ID == channelID:
+		// Same channel, same alias — nothing to do. Refresh cache so any stale
+		// entry from before a restart gets rewritten.
+		c.redis.Set(fmt.Sprintf("channel:alias:%s", alias), existing, 24*time.Hour)
+		return nil
+	case err == nil && existing.ID != channelID:
+		return fmt.Errorf("alias %q already claimed by channel %s", alias, existing.ID)
+	case err != nil && err != gorm.ErrRecordNotFound:
+		return err
+	}
+
+	// Fetch the target channel so we can both validate it exists and return
+	// a reasonable error if it was soft-deleted in the meantime.
+	target, err := c.GetChannelByID(channelID)
+	if err != nil {
+		return err
+	}
+
+	if err := c.db.DB.Model(&models.Channel{}).
+		Where("id = ?", channelID).
+		Update("alias", alias).Error; err != nil {
+		return err
+	}
+	target.Alias = alias
+
+	// Invalidate stale caches. The id-keyed cache holds the old (Alias-less)
+	// record; the alias-keyed cache should reflect the fresh binding.
+	c.redis.Delete(fmt.Sprintf("channel:%s", channelID))
+	c.redis.Set(fmt.Sprintf("channel:alias:%s", alias), *target, 24*time.Hour)
+	return nil
+}
+
 func (c *ChannelService) GetUserChannels(userID string) ([]*models.Channel, error) {
 	var channels []*models.Channel
 	err := c.db.DB.
@@ -161,6 +264,28 @@ func (c *ChannelService) UpdateChannel(userID, channelID string, updates map[str
 		channel.Config = cfg
 	}
 
+	// 更新 alias：验证格式和唯一性
+	if newAlias, ok := updates["alias"].(string); ok {
+		if newAlias != "" {
+			if err := validateAlias(newAlias); err != nil {
+				return nil, ErrInvalidAlias
+			}
+			// 检查 alias 是否已被其他 channel 占用
+			var existing models.Channel
+			dbErr := c.db.DB.Where("alias = ? AND id != ? AND deleted_at IS NULL", newAlias, channelID).First(&existing).Error
+			if dbErr == nil {
+				return nil, ErrAliasDuplicated
+			} else if dbErr != gorm.ErrRecordNotFound {
+				return nil, dbErr
+			}
+		}
+		// 清理旧 alias 的缓存
+		if channel.Alias != "" && channel.Alias != newAlias {
+			c.redis.Delete(fmt.Sprintf("channel:alias:%s", channel.Alias))
+		}
+		channel.Alias = newAlias
+	}
+
 	channel.UpdatedAt = time.Now()
 
 	if err := c.db.DB.Save(&channel).Error; err != nil {
@@ -169,6 +294,10 @@ func (c *ChannelService) UpdateChannel(userID, channelID string, updates map[str
 
 	cacheKey := fmt.Sprintf("channel:%s", channelID)
 	c.redis.Set(cacheKey, channel, 24*time.Hour)
+	// 如果设置了新 alias，也缓存 alias 索引
+	if channel.Alias != "" {
+		c.redis.Set(fmt.Sprintf("channel:alias:%s", channel.Alias), channel, 24*time.Hour)
+	}
 	return &channel, nil
 }
 

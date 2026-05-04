@@ -231,14 +231,7 @@ Authorization: Bearer &lt;your_token&gt;
                         <select id="channel-type" required
                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
                             onchange="onTypeChange(this.value)">
-                            <option value="http">HTTP（反向代理）</option>
-                            <option value="https">HTTPS（反向代理）</option>
-                            <option value="ws">WebSocket（反向代理）</option>
-                            <option value="tcp">TCP（反向代理）</option>
-                            <option value="udp">UDP（反向代理）</option>
-                            <option value="tunnel-http">tunnel-http（隧道模式 🔗）</option>
-                            <option value="tunnel-ws">tunnel-ws（隧道 WebSocket 🔗）</option>
-                            <option value="tunnel-tcp">tunnel-tcp（隧道模式 🔗）</option>
+                            <option value="tunnel-ws">tunnel-ws（隧道 WebSocket）</option>
                         </select>
                     </div>
 
@@ -502,7 +495,7 @@ Authorization: Bearer &lt;your_token&gt;
             const tip = document.getElementById('tunnel-tip');
             const targetInput = document.getElementById('channel-target');
             const targetLabel = document.getElementById('target-label');
-            const isTunnel = type === 'tunnel-http' || type === 'tunnel-tcp' || type === 'tunnel-ws';
+            const isTunnel = type === 'tunnel-ws';
             if (isTunnel) {
                 tip.classList.remove('hidden');
                 const target = targetInput.value || 'http://localhost:3000';

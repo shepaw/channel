@@ -37,6 +37,7 @@ type CreateChannelRequest struct {
 	Description string                 `json:"description"`
 	Type        string                 `json:"type"   binding:"required,oneof=http https ws tcp udp tunnel-http tunnel-tcp tunnel-ws"`
 	Target      string                 `json:"target"`
+	Alias       string                 `json:"alias"` // optional, must not conflict with existing aliases
 	Config      map[string]interface{} `json:"config"`
 }
 
@@ -44,6 +45,7 @@ type UpdateChannelRequest struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	IsActive    *bool                  `json:"is_active"`
+	Alias       *string                `json:"alias"` // optional pointer: nil = no change, "" = clear alias, "foo" = set alias
 	Config      map[string]interface{} `json:"config"`
 }
 
@@ -76,13 +78,17 @@ func (h *ChannelHandler) Create(c *gin.Context) {
 
 	// TCP/UDP 需要通过 V2 分配端口
 	if (req.Type == "tcp" || req.Type == "udp") && h.channelSvcV2 != nil && h.proxyHandler != nil {
-		channel, port, err := h.channelSvcV2.CreateChannelWithPort(userID, req.Name, req.Description, req.Type, req.Target, req.Config)
+		channel, port, err := h.channelSvcV2.CreateChannelWithPort(userID, req.Name, req.Description, req.Type, req.Target, req.Alias, req.Config)
 		if err != nil {
 			switch err {
 			case services.ErrMaxChannelsExceeded:
 				c.JSON(http.StatusForbidden, gin.H{"error": "Maximum number of channels exceeded"})
 			case services.ErrInvalidChannelType:
 				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel type"})
+			case services.ErrAliasDuplicated:
+				c.JSON(http.StatusConflict, gin.H{"error": "Alias already exists"})
+			case services.ErrInvalidAlias:
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid alias format"})
 			default:
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel: " + err.Error()})
 			}
@@ -106,13 +112,17 @@ func (h *ChannelHandler) Create(c *gin.Context) {
 	}
 
 	// HTTP/HTTPS/WS/tunnel-http/tunnel-tcp
-	channel, err := h.channelSvc.CreateChannel(userID, req.Name, req.Description, req.Type, req.Target, req.Config)
+	channel, err := h.channelSvc.CreateChannel(userID, req.Name, req.Description, req.Type, req.Target, req.Alias, req.Config)
 	if err != nil {
 		switch err {
 		case services.ErrMaxChannelsExceeded:
 			c.JSON(http.StatusForbidden, gin.H{"error": "Maximum number of channels exceeded"})
 		case services.ErrInvalidChannelType:
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel type"})
+		case services.ErrAliasDuplicated:
+			c.JSON(http.StatusConflict, gin.H{"error": "Alias already exists"})
+		case services.ErrInvalidAlias:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid alias format"})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel: " + err.Error()})
 		}
@@ -194,12 +204,20 @@ func (h *ChannelHandler) Update(c *gin.Context) {
 	if req.Config != nil {
 		updates["config"] = req.Config
 	}
+	// Alias 字段：使用指针区分「未设置」和「清空」
+	if req.Alias != nil {
+		updates["alias"] = *req.Alias
+	}
 
 	channel, err := h.channelSvc.UpdateChannel(userID, channelID, updates)
 	if err != nil {
 		switch err {
 		case services.ErrNotChannelOwner:
 			c.JSON(http.StatusForbidden, gin.H{"error": "Not channel owner"})
+		case services.ErrAliasDuplicated:
+			c.JSON(http.StatusConflict, gin.H{"error": "Alias already exists"})
+		case services.ErrInvalidAlias:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid alias format"})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update channel"})
 		}

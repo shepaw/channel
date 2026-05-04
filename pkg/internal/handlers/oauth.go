@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -45,6 +46,24 @@ type WechatQRCodeResponse struct {
 }
 
 func (h *OAuthHandler) WechatQRCode(c *gin.Context) {
+	// Dev 模式：返回假二维码数据，前端轮询时直接返回 token
+	if os.Getenv("DEV_SKIP_AUTH") == "1" {
+		sceneID := uuid.New().String()
+		token, err := h.devGenerateToken()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "dev login failed"})
+			return
+		}
+		// 直接写入已确认状态，前端首次轮询即可拿到 token
+		h.redis.Set(fmt.Sprintf("wechat:scene:%s", sceneID), token, 5*time.Minute)
+		c.JSON(http.StatusOK, WechatQRCodeResponse{
+			SceneID:       sceneID,
+			QRCodeURL:     "/static/dev-qrcode-placeholder.png",
+			ExpireSeconds: 300,
+		})
+		return
+	}
+
 	// 在实际实现中，需要配置微信公众号或开放平台
 	// 这里使用微信公众平台的网页授权二维码登录
 	appID := h.config.WechatAppID
@@ -156,6 +175,12 @@ func (h *OAuthHandler) WechatCallback(c *gin.Context) {
 // ===== Google OAuth =====
 
 func (h *OAuthHandler) GoogleInitiate(c *gin.Context) {
+	// Dev 模式：跳过真实 OAuth，直接生成 token 并跳转
+	if os.Getenv("DEV_SKIP_AUTH") == "1" {
+		h.devLogin(c)
+		return
+	}
+
 	clientID := h.config.GoogleClientID
 	if clientID == "" {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Google login not configured"})
@@ -351,4 +376,33 @@ func getGoogleUserInfo(accessToken string) (*GoogleUserInfo, error) {
 	}
 
 	return &result, nil
+}
+
+// ===== Dev 模式辅助方法 =====
+
+// devGenerateToken 在 DEV_SKIP_AUTH=1 时创建/获取 dev 用户并生成 token
+func (h *OAuthHandler) devGenerateToken() (string, error) {
+	devUserID := os.Getenv("DEV_USER_ID")
+	if devUserID == "" {
+		devUserID = devSkipAuthUserID
+	}
+	user, err := h.authSvc.CreateOrGetUser("dev", devUserID, "dev@local.test", "Dev User", "")
+	if err != nil {
+		return "", err
+	}
+	token, err := h.authSvc.GenerateAccessToken(user.ID, h.config.TokenTTL)
+	if err != nil {
+		return "", err
+	}
+	return token.Token, nil
+}
+
+// devLogin 在 DEV_SKIP_AUTH=1 时直接生成 token 并重定向到 oauth-callback
+func (h *OAuthHandler) devLogin(c *gin.Context) {
+	token, err := h.devGenerateToken()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "dev login failed: " + err.Error()})
+		return
+	}
+	c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("/oauth-callback?token=%s", token))
 }

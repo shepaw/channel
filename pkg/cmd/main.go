@@ -155,6 +155,23 @@ func main() {
 	r.Any("/proxy/:channel_id", proxyFunc)
 	r.Any("/proxy/:channel_id/*path", proxyFunc)
 
+	// 别名路由：/c/<alias>/... → /proxy/<channel_id>/... (alias 由 agent 在
+	// /tunnel/connect 握手时通过 &endpoint=<alias> 声明，见 ChannelService.ClaimAlias)
+	aliasProxyFunc := func(c *gin.Context) {
+		if strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
+			c.Abort()
+		}
+		alias := c.Param("endpoint")
+		channel, err := channelSvcV2.ChannelService.GetChannelByAlias(alias)
+		if err != nil {
+			http.Error(c.Writer, "Channel alias not found", http.StatusNotFound)
+			return
+		}
+		proxyHandler.ServeHTTP(c.Writer, c.Request, channel.ID)
+	}
+	r.Any("/c/:endpoint", aliasProxyFunc)
+	r.Any("/c/:endpoint/*path", aliasProxyFunc)
+
 	// 健康检查
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "time": time.Now().Format(time.RFC3339)})

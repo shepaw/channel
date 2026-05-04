@@ -91,7 +91,7 @@ func NewChannelServiceV2(db *DatabaseService, redis *RedisService, config *model
 }
 
 // CreateChannelWithPort 创建 channel，TCP/UDP 额外分配端口
-func (v *ChannelServiceV2) CreateChannelWithPort(userID, name, description, channelType, target string, config map[string]interface{}) (*models.Channel, int, error) {
+func (v *ChannelServiceV2) CreateChannelWithPort(userID, name, description, channelType, target, alias string, config map[string]interface{}) (*models.Channel, int, error) {
 	var allocatedPort int
 
 	if channelType == "tcp" || channelType == "udp" {
@@ -102,7 +102,7 @@ func (v *ChannelServiceV2) CreateChannelWithPort(userID, name, description, chan
 		allocatedPort = port
 	}
 
-	channel, err := v.ChannelService.CreateChannel(userID, name, description, channelType, target, config)
+	channel, err := v.ChannelService.CreateChannel(userID, name, description, channelType, target, alias, config)
 	if err != nil {
 		if allocatedPort > 0 {
 			v.portAllocator.Release(allocatedPort)
