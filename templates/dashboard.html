@@ -236,10 +236,11 @@ Authorization: Bearer &lt;your_token&gt;
                     </div>
 
                     <div>
-                        <label class="text-sm font-medium text-gray-700 block mb-1" id="target-label">目标地址 *</label>
-                        <input type="text" id="channel-target" required
+                        <label class="text-sm font-medium text-gray-700 block mb-1">地址别名 <span class="text-gray-400 font-normal">（可选）</span></label>
+                        <input type="text" id="channel-alias" maxlength="64"
                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                            placeholder="例：http://localhost:3000">
+                            placeholder="例：my-app（小写字母 / 数字 / 连字符）">
+                        <p class="text-xs text-gray-400 mt-1">设置后可通过 <code class="bg-gray-100 px-1 rounded">/c/&lt;别名&gt;</code> 访问，不填则仅支持长路径</p>
                     </div>
 
                     <div>
@@ -248,6 +249,8 @@ Authorization: Bearer &lt;your_token&gt;
                             class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                             placeholder="可选描述"></textarea>
                     </div>
+
+                    <input type="hidden" id="channel-target">
 
                     <!-- 隧道模式提示（选择 tunnel-* 时显示） -->
                     <div id="tunnel-tip" class="hidden bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm text-blue-800">
@@ -420,8 +423,8 @@ Authorization: Bearer &lt;your_token&gt;
                             </div>
                             <p class="text-sm text-gray-500 mb-2">${escapeHtml(ch.description || '')}</p>
                             <div class="flex items-center gap-2">
-                                <code class="text-xs bg-gray-100 px-2 py-1 rounded text-blue-700 break-all flex-1">${ch.endpoint}</code>
-                                <button onclick="copyEndpoint('${ch.endpoint}')" class="text-gray-400 hover:text-gray-600 flex-shrink-0" title="复制地址">
+                                <code class="text-xs bg-gray-100 px-2 py-1 rounded text-blue-700 break-all flex-1">${ch.alias ? window.location.origin + '/c/' + ch.alias : ch.endpoint}</code>
+                                <button onclick="copyEndpoint('${ch.alias ? window.location.origin + '/c/' + ch.alias : ch.endpoint}')" class="text-gray-400 hover:text-gray-600 flex-shrink-0" title="复制地址">
                                     <i class="fas fa-copy text-sm"></i>
                                 </button>
                             </div>
@@ -494,21 +497,10 @@ Authorization: Bearer &lt;your_token&gt;
         function onTypeChange(type) {
             const tip = document.getElementById('tunnel-tip');
             const targetInput = document.getElementById('channel-target');
-            const targetLabel = document.getElementById('target-label');
-            const isTunnel = type === 'tunnel-ws';
-            if (isTunnel) {
-                tip.classList.remove('hidden');
-                const target = targetInput.value || 'http://localhost:3000';
-                document.getElementById('tip-target').textContent = target;
-                document.getElementById('tip-server').textContent = window.location.origin;
-                // 隧道模式目标地址可选（由 agent 端指定）
-                targetInput.required = false;
-                targetLabel.textContent = '目标地址（可选，可由 agent 端指定）';
-            } else {
-                tip.classList.add('hidden');
-                targetInput.required = true;
-                targetLabel.textContent = '目标地址 *';
-            }
+            tip.classList.remove('hidden');
+            const target = targetInput.value || 'http://localhost:3000';
+            document.getElementById('tip-target').textContent = target;
+            document.getElementById('tip-server').textContent = window.location.origin;
         }
 
         function openCreateModal() {
@@ -522,12 +514,14 @@ Authorization: Bearer &lt;your_token&gt;
 
         async function submitCreateChannel(e) {
             e.preventDefault();
+            const alias = document.getElementById('channel-alias').value.trim();
             const payload = {
                 name: document.getElementById('channel-name').value,
                 type: document.getElementById('channel-type').value,
                 target: document.getElementById('channel-target').value,
                 description: document.getElementById('channel-description').value,
             };
+            if (alias) payload.alias = alias;
 
             try {
                 const resp = await fetch(`${API_BASE}/channels`, {

@@ -138,6 +138,9 @@ func (h *ChannelHandler) Create(c *gin.Context) {
 		if channel.Target != "" {
 			setupCmd += " --target " + channel.Target
 		}
+		if channel.Alias != "" {
+			setupCmd += " --endpoint " + channel.Alias
+		}
 		c.JSON(http.StatusCreated, gin.H{
 			"channel":       channel,
 			"secret":        channel.Secret,
