@@ -127,7 +127,8 @@ func main() {
 				ch.POST("/:id/rate-limits", channelHandler.AddRateLimitRule)
 				ch.GET("/:id/rate-limits", channelHandler.GetRateLimitRules)
 				ch.DELETE("/:id/rate-limits/:rule_id", channelHandler.DeleteRateLimitRule)
-				ch.POST("/:id/rotate-secret", tunnelHandler.RotateSecret) // 重置 tunnel secret
+				ch.GET("/:id/secret", channelHandler.GetSecret)             // 查看 tunnel secret
+				ch.POST("/:id/rotate-secret", tunnelHandler.RotateSecret)  // 重置 tunnel secret
 			}
 		}
 	}

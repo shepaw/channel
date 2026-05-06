@@ -362,6 +362,7 @@ Authorization: Bearer &lt;your_token&gt;
         let token = localStorage.getItem('access_token');
         const API_BASE = '/api/v1';
         let channels = [];
+        const secretCache = {}; // 缓存已获取的 secret，key: channelID
 
         // 初始化
         async function init() {
@@ -428,6 +429,18 @@ Authorization: Bearer &lt;your_token&gt;
                                     <i class="fas fa-copy text-sm"></i>
                                 </button>
                             </div>
+                            ${(ch.type === 'tunnel-http' || ch.type === 'tunnel-tcp' || ch.type === 'tunnel-ws') ? `
+                            <div class="flex items-center gap-2 mt-1">
+                                <i class="fas fa-key text-xs text-gray-400 flex-shrink-0"></i>
+                                <code id="secret-display-${ch.id}" class="text-xs bg-gray-100 px-2 py-1 rounded text-gray-500 font-mono flex-1">••••••••••••••••</code>
+                                <button onclick="toggleSecret('${ch.id}')" id="secret-eye-btn-${ch.id}" class="text-gray-400 hover:text-gray-600 flex-shrink-0" title="查看 Secret">
+                                    <i class="fas fa-eye text-sm"></i>
+                                </button>
+                                <button onclick="copyChannelSecret('${ch.id}')" class="text-gray-400 hover:text-gray-600 flex-shrink-0" title="复制 Secret">
+                                    <i class="fas fa-copy text-sm"></i>
+                                </button>
+                            </div>
+                            ` : ''}
                         </div>
                         <div class="flex gap-2 ml-4">
                             <button onclick="openRateLimitModal('${ch.id}')" class="text-gray-400 hover:text-blue-500" title="限流设置">
@@ -626,6 +639,62 @@ Authorization: Bearer &lt;your_token&gt;
                 document.body.appendChild(toast);
                 setTimeout(() => toast.remove(), 2000);
             });
+        }
+
+        // 获取 channel secret（带缓存）
+        async function fetchChannelSecret(channelID) {
+            if (secretCache[channelID]) return secretCache[channelID];
+            const resp = await fetch(`${API_BASE}/channels/${channelID}/secret`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!resp.ok) throw new Error('获取 Secret 失败');
+            const data = await resp.json();
+            secretCache[channelID] = data.secret;
+            return data.secret;
+        }
+
+        // 切换 secret 显示/隐藏
+        async function toggleSecret(channelID) {
+            const display = document.getElementById(`secret-display-${channelID}`);
+            const eyeBtn = document.getElementById(`secret-eye-btn-${channelID}`);
+            if (!display) return;
+
+            const isHidden = display.textContent.startsWith('•');
+            if (isHidden) {
+                try {
+                    const secret = await fetchChannelSecret(channelID);
+                    // 省略展示：显示前4位 + ... + 后4位
+                    const masked = secret.length > 8
+                        ? secret.slice(0, 4) + '••••••••' + secret.slice(-4)
+                        : secret;
+                    display.textContent = masked;
+                    display.title = secret; // 悬停可看完整值
+                    display.classList.remove('text-gray-500');
+                    display.classList.add('text-gray-800');
+                    eyeBtn.querySelector('i').className = 'fas fa-eye-slash text-sm';
+                    eyeBtn.title = '隐藏 Secret';
+                } catch (e) {
+                    showToast('获取 Secret 失败');
+                }
+            } else {
+                display.textContent = '••••••••••••••••';
+                display.title = '';
+                display.classList.remove('text-gray-800');
+                display.classList.add('text-gray-500');
+                eyeBtn.querySelector('i').className = 'fas fa-eye text-sm';
+                eyeBtn.title = '查看 Secret';
+            }
+        }
+
+        // 复制 channel secret
+        async function copyChannelSecret(channelID) {
+            try {
+                const secret = await fetchChannelSecret(channelID);
+                await navigator.clipboard.writeText(secret);
+                showToast('Secret 已复制');
+            } catch (e) {
+                showToast('复制失败，请重试');
+            }
         }
 
         // ── Secret 弹窗 ────────────────────────────────────────────────────────

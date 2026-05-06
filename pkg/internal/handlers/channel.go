@@ -298,3 +298,27 @@ func (h *ChannelHandler) DeleteRateLimitRule(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Rate limit rule deleted successfully"})
 }
+
+// GetSecret 获取 tunnel channel 的 secret（需要 owner 校验）
+func (h *ChannelHandler) GetSecret(c *gin.Context) {
+	channelID := c.Param("id")
+	userID := c.GetString("user_id")
+
+	channel, err := h.channelSvc.GetChannelByID(channelID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
+		return
+	}
+
+	if !h.channelSvc.IsOwner(userID, channelID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not channel owner"})
+		return
+	}
+
+	if channel.Secret == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "This channel has no secret"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"secret": channel.Secret})
+}
