@@ -624,20 +624,39 @@ Authorization: Bearer &lt;your_token&gt;
             }
         }
 
+        // 兼容 HTTP（非安全上下文）的剪贴板写入
+        function copyToClipboard(text) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                return navigator.clipboard.writeText(text);
+            }
+            // fallback: execCommand
+            return new Promise((resolve, reject) => {
+                const ta = document.createElement('textarea');
+                ta.value = text;
+                ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                try {
+                    document.execCommand('copy') ? resolve() : reject(new Error('execCommand failed'));
+                } catch (e) {
+                    reject(e);
+                } finally {
+                    document.body.removeChild(ta);
+                }
+            });
+        }
+
         function copyToken() {
             const tokenVal = document.getElementById('token-value').textContent;
-            navigator.clipboard.writeText(tokenVal).then(() => {
+            copyToClipboard(tokenVal).then(() => {
                 alert('Token 已复制到剪贴板');
             });
         }
 
         function copyEndpoint(endpoint) {
-            navigator.clipboard.writeText(endpoint).then(() => {
-                const toast = document.createElement('div');
-                toast.textContent = '地址已复制';
-                toast.className = 'fixed bottom-4 right-4 bg-gray-800 text-white py-2 px-4 rounded-lg text-sm z-50';
-                document.body.appendChild(toast);
-                setTimeout(() => toast.remove(), 2000);
+            copyToClipboard(endpoint).then(() => {
+                showToast('地址已复制');
             });
         }
 
@@ -690,7 +709,7 @@ Authorization: Bearer &lt;your_token&gt;
         async function copyChannelSecret(channelID) {
             try {
                 const secret = await fetchChannelSecret(channelID);
-                await navigator.clipboard.writeText(secret);
+                await copyToClipboard(secret);
                 showToast('Secret 已复制');
             } catch (e) {
                 showToast('复制失败，请重试');
@@ -710,12 +729,12 @@ Authorization: Bearer &lt;your_token&gt;
 
         function copySecret() {
             const val = document.getElementById('secret-value').textContent;
-            navigator.clipboard.writeText(val).then(() => showToast('Secret 已复制'));
+            copyToClipboard(val).then(() => showToast('Secret 已复制'));
         }
 
         function copySetupCommand() {
             const val = document.getElementById('setup-command').textContent;
-            navigator.clipboard.writeText(val).then(() => showToast('命令已复制'));
+            copyToClipboard(val).then(() => showToast('命令已复制'));
         }
 
         function showToast(msg) {
