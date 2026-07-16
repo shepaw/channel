@@ -31,6 +31,8 @@ cp .env.example .env   # 填入 OAuth 配置
 docker-compose up -d
 ```
 
+生产部署（TLS、鉴权、Redis）见 [docs/DOCKER_PRODUCTION.md](docs/DOCKER_PRODUCTION.md)。
+
 ## 工作流程
 
 1. **用户登录** → 微信扫码 或 Google OAuth
