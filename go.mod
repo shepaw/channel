@@ -1,12 +1,15 @@
 module github.com/edenzou/channel-service
 
-go 1.22
+go 1.23
+
+toolchain go1.24.5
 
 require (
 	github.com/gin-gonic/gin v1.9.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.1
 	github.com/redis/go-redis/v9 v9.5.1
+	golang.org/x/crypto v0.14.0
 	gorm.io/driver/postgres v1.5.7
 	gorm.io/driver/sqlite v1.5.5
 	gorm.io/gorm v1.25.9
@@ -41,7 +44,6 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.11 // indirect
 	golang.org/x/arch v0.3.0 // indirect
-	golang.org/x/crypto v0.14.0 // indirect
 	golang.org/x/net v0.17.0 // indirect
 	golang.org/x/sys v0.26.0 // indirect
 	golang.org/x/text v0.13.0 // indirect

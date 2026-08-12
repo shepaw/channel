@@ -82,6 +82,15 @@ func VerifySignature(secret, channelID, timestamp, nonce, signature string) bool
 	return hmac.Equal([]byte(expected), []byte(signature))
 }
 
+// VerifySignatureRaw 用任意 signing string 校验 HMAC-SHA256 签名
+// （agent 注册 / 带 agent_id 的隧道握手使用扩展签名串，在此统一验证）
+func VerifySignatureRaw(secret, signingString, signature string) bool {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(signingString))
+	expected := hex.EncodeToString(mac.Sum(nil))
+	return hmac.Equal([]byte(expected), []byte(signature))
+}
+
 // ValidateTimestamp 校验时间戳是否在允许的窗口内
 func ValidateTimestamp(timestampStr string) error {
 	ts, err := strconv.ParseInt(timestampStr, 10, 64)

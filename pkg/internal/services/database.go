@@ -49,6 +49,8 @@ func NewDatabaseService(dbURL string) (*DatabaseService, error) {
 		&models.RateLimitRule{},
 		&models.EmailVerification{},
 		&models.AppVersion{},
+		&models.Agent{},
+		&models.MailboxMessage{},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to auto migrate: %v", err)

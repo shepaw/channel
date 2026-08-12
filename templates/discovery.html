@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent 发现 · Channel Service</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+<body class="bg-gray-50 min-h-screen">
+    <header class="bg-white border-b border-gray-200">
+        <div class="max-w-4xl mx-auto px-6 py-4 flex justify-between items-center">
+            <div>
+                <h1 class="text-xl font-bold text-gray-800"><i class="fas fa-compass text-indigo-500 mr-2"></i>Agent 发现</h1>
+                <p class="text-sm text-gray-500 mt-0.5">搜索公开 Agent 名片 · 连接需授权</p>
+            </div>
+            <a href="/dashboard" class="text-sm text-blue-600 hover:underline">管理后台</a>
+        </div>
+    </header>
+
+    <main class="max-w-4xl mx-auto px-6 py-8">
+        <div class="bg-white rounded-xl shadow-sm p-4 mb-6 flex gap-3">
+            <input id="q" type="search" placeholder="搜索名称 / 描述 / agent_id…"
+                class="flex-1 border border-gray-300 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                onkeydown="if(event.key==='Enter')search(1)">
+            <button onclick="search(1)"
+                class="bg-indigo-600 text-white px-6 py-2.5 rounded-lg hover:bg-indigo-700 text-sm font-medium">
+                <i class="fas fa-search mr-1"></i>搜索
+            </button>
+        </div>
+
+        <div id="list" class="grid gap-3"></div>
+        <div id="empty" class="hidden text-center py-16 text-gray-400">
+            <i class="fas fa-robot text-4xl mb-4"></i>
+            <p>没有找到公开 Agent</p>
+        </div>
+        <div id="pager" class="hidden mt-6 flex justify-center gap-3 text-sm"></div>
+    </main>
+
+    <!-- 名片弹层 -->
+    <div id="card-modal" class="hidden fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onclick="if(event.target===this)closeCard()">
+        <div class="bg-white rounded-2xl shadow-xl max-w-md w-full p-6">
+            <div class="flex items-start gap-4 mb-4">
+                <div class="w-12 h-12 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center text-xl">
+                    <i class="fas fa-robot"></i>
+                </div>
+                <div class="flex-1 min-w-0">
+                    <h2 id="card-name" class="text-lg font-bold text-gray-800"></h2>
+                    <p id="card-status" class="text-sm text-gray-500"></p>
+                </div>
+                <button onclick="closeCard()" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button>
+            </div>
+            <p id="card-desc" class="text-sm text-gray-600 mb-4"></p>
+            <dl class="space-y-2 text-sm">
+                <div class="flex gap-2"><dt class="text-gray-400 w-16 flex-shrink-0">Agent ID</dt><dd id="card-id" class="font-mono text-gray-700 break-all"></dd></div>
+                <div class="flex gap-2"><dt class="text-gray-400 w-16 flex-shrink-0">指纹</dt><dd id="card-fp" class="font-mono text-gray-700"></dd></div>
+                <div class="flex gap-2"><dt class="text-gray-400 w-16 flex-shrink-0">容量</dt><dd id="card-cap" class="text-gray-700"></dd></div>
+            </dl>
+            <p class="mt-5 text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2">
+                <i class="fas fa-lock mr-1"></i>名片可见，连接需授权。授权功能即将上线（P3）。
+            </p>
+        </div>
+    </div>
+
+    <script>
+        const API = '/api/v1';
+        let page = 1;
+
+        function escapeHtml(str) {
+            const d = document.createElement('div');
+            d.appendChild(document.createTextNode(str || ''));
+            return d.innerHTML;
+        }
+
+        async function search(p) {
+            if (p) page = p;
+            const q = document.getElementById('q').value.trim();
+            const list = document.getElementById('list');
+            const empty = document.getElementById('empty');
+            const pager = document.getElementById('pager');
+            list.innerHTML = '<p class="text-gray-400 text-sm text-center py-8">搜索中…</p>';
+
+            try {
+                const params = new URLSearchParams({ page: String(page), page_size: '12' });
+                if (q) params.set('q', q);
+                const resp = await fetch(`${API}/discovery/agents?${params}`);
+                const data = await resp.json();
+                if (!resp.ok) {
+                    list.innerHTML = `<p class="text-red-500 text-center">${escapeHtml(data.error || '搜索失败')}</p>`;
+                    return;
+                }
+                const agents = data.agents || [];
+                if (agents.length === 0) {
+                    list.innerHTML = '';
+                    empty.classList.remove('hidden');
+                    pager.classList.add('hidden');
+                    return;
+                }
+                empty.classList.add('hidden');
+                list.innerHTML = agents.map(a => `
+                    <button onclick="openCard('${escapeHtml(a.agent_id)}')"
+                        class="bg-white rounded-xl shadow-sm p-4 flex items-start gap-3 text-left hover:shadow-md transition w-full">
+                        <div class="w-10 h-10 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center flex-shrink-0">
+                            <i class="fas fa-robot"></i>
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="font-semibold text-gray-800">${escapeHtml(a.name)}</span>
+                                <span class="w-2 h-2 rounded-full ${a.online ? 'bg-green-500' : 'bg-gray-300'}"></span>
+                                <span class="text-xs text-gray-400">${a.online ? '在线' : '离线'}</span>
+                            </div>
+                            <p class="text-sm text-gray-500 truncate">${escapeHtml(a.description || '暂无描述')}</p>
+                            <code class="text-xs text-gray-400">${escapeHtml(a.agent_id)}</code>
+                        </div>
+                    </button>
+                `).join('');
+
+                const totalPages = Math.max(1, Math.ceil((data.total || 0) / (data.page_size || 12)));
+                if (totalPages > 1) {
+                    pager.classList.remove('hidden');
+                    pager.innerHTML = `
+                        <button ${page <= 1 ? 'disabled' : ''} onclick="search(${page - 1})"
+                            class="px-4 py-1.5 rounded-lg border ${page <= 1 ? 'text-gray-300' : 'hover:bg-white bg-white'}">上一页</button>
+                        <span class="px-3 py-1.5 text-gray-500">${page} / ${totalPages}（共 ${data.total}）</span>
+                        <button ${page >= totalPages ? 'disabled' : ''} onclick="search(${page + 1})"
+                            class="px-4 py-1.5 rounded-lg border ${page >= totalPages ? 'text-gray-300' : 'hover:bg-white bg-white'}">下一页</button>
+                    `;
+                } else {
+                    pager.classList.add('hidden');
+                }
+            } catch (err) {
+                list.innerHTML = `<p class="text-red-500 text-center">网络错误：${escapeHtml(err.message)}</p>`;
+            }
+        }
+
+        async function openCard(agentID) {
+            try {
+                const resp = await fetch(`${API}/discovery/agents/${encodeURIComponent(agentID)}`);
+                const a = await resp.json();
+                if (!resp.ok) { alert(a.error || '未找到'); return; }
+                document.getElementById('card-name').textContent = a.name;
+                document.getElementById('card-status').textContent = a.online ? '● 在线' : '○ 离线';
+                document.getElementById('card-status').className = 'text-sm ' + (a.online ? 'text-green-600' : 'text-gray-400');
+                document.getElementById('card-desc').textContent = a.description || '暂无描述';
+                document.getElementById('card-id').textContent = a.agent_id;
+                document.getElementById('card-fp').textContent = a.agent_fp || '(无)';
+                document.getElementById('card-cap').textContent = a.capacity;
+                document.getElementById('card-modal').classList.remove('hidden');
+            } catch (err) {
+                alert('网络错误：' + err.message);
+            }
+        }
+
+        function closeCard() {
+            document.getElementById('card-modal').classList.add('hidden');
+        }
+
+        // 从 URL ?q= 预填
+        const urlQ = new URLSearchParams(location.search).get('q');
+        if (urlQ) document.getElementById('q').value = urlQ;
+        search(1);
+    </script>
+</body>
+</html>

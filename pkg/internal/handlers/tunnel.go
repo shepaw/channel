@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 
 	"github.com/edenzou/channel-service/pkg/internal/services"
 	"github.com/gin-gonic/gin"
@@ -15,7 +16,8 @@ type TunnelHandler struct {
 	tunnelMgr  *services.TunnelManager
 	channelSvc *services.ChannelService
 	authSvc    *services.AuthService
-	nonces     *services.NonceCache // 防重放 nonce 缓存
+	agentSvc   *services.AgentService // 可为 nil；非空时握手携带 agent_id 即注册
+	nonces     *services.NonceCache   // 防重放 nonce 缓存
 }
 
 func NewTunnelHandler(tunnelMgr *services.TunnelManager, channelSvc *services.ChannelService, authSvc *services.AuthService) *TunnelHandler {
@@ -25,6 +27,11 @@ func NewTunnelHandler(tunnelMgr *services.TunnelManager, channelSvc *services.Ch
 		authSvc:    authSvc,
 		nonces:     services.NewNonceCache(),
 	}
+}
+
+// SetAgentService 注入 agent 注册服务（main 中调用）
+func (h *TunnelHandler) SetAgentService(agentSvc *services.AgentService) {
+	h.agentSvc = agentSvc
 }
 
 var tunnelUpgrader = websocket.Upgrader{
@@ -83,8 +90,24 @@ func (h *TunnelHandler) Connect(c *gin.Context) {
 		return
 	}
 
-	// 4. 使用服务端存储的 secret 验证签名
-	if !services.VerifySignature(channel.Secret, channelID, timestamp, nonce, signature) {
+	// agent 注册扩展参数（全部可选；不带则行为与旧版完全一致）
+	agentID := c.Query("agent_id")
+	agentFP := c.Query("agent_fp")
+	agentName := c.Query("name")
+	deviceID := c.Query("device_id")
+	capacity, _ := strconv.Atoi(c.Query("capacity"))
+
+	// 4. 使用服务端存储的 secret 验证签名。
+	//    兼容两种签名串：
+	//    旧版 "{channel_id}\n{timestamp}\n{nonce}"（所有现存 agent）
+	//    新版 "{channel_id}\n{agent_id}\n{device_id}\n{timestamp}\n{nonce}"（带注册参数时推荐，
+	//    把 agent_id/device_id 纳入签名防篡改）。带 agent_id 时两种都接受，保证新旧客户端互通。
+	sigOK := services.VerifySignature(channel.Secret, channelID, timestamp, nonce, signature)
+	if !sigOK && agentID != "" {
+		signingString := fmt.Sprintf("%s\n%s\n%s\n%s\n%s", channelID, agentID, deviceID, timestamp, nonce)
+		sigOK = services.VerifySignatureRaw(channel.Secret, signingString, signature)
+	}
+	if !sigOK {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid signature"})
 		return
 	}
@@ -116,6 +139,24 @@ func (h *TunnelHandler) Connect(c *gin.Context) {
 		log.Printf("🔗 Channel %s bound alias %q", channelID, alias)
 	}
 
+	// 连接即注册：握手携带 agent_id 时 upsert 注册记录（best-effort）。
+	// agent_id 已被其他 channel 绑定时只记日志、不阻断隧道——注册冲突不应
+	// 打断既有转发功能，冲突通过 dashboard 由 owner 处理。
+	if agentID != "" && h.agentSvc != nil {
+		if _, err := h.agentSvc.Register(services.RegisterAgentParams{
+			AgentID:   agentID,
+			ChannelID: channelID,
+			Name:      agentName,
+			AgentFP:   agentFP,
+			DeviceID:  deviceID,
+			Capacity:  capacity,
+		}); err != nil {
+			log.Printf("⚠️  Agent register on tunnel connect failed: channel=%s agent=%s err=%v", channelID, agentID, err)
+		} else {
+			log.Printf("🤖 Agent registered via tunnel: channel=%s agent=%s device=%s", channelID, agentID, deviceID)
+		}
+	}
+
 	// WebSocket 升级
 	conn, err := tunnelUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -123,11 +164,12 @@ func (h *TunnelHandler) Connect(c *gin.Context) {
 		return
 	}
 
-	log.Printf("✅ Tunnel connected: channel=%s type=%s (signature auth)", channelID, channel.Type)
+	log.Printf("✅ Tunnel connected: channel=%s type=%s device=%s (signature auth)", channelID, channel.Type, deviceID)
 
-	// 注册到 TunnelManager（自动踢掉旧连接）
+	// 注册到 TunnelManager（同一 device_id 重连踢掉自己的旧连接；不同设备共存。
+	// 不带 device_id 的旧客户端视为单一默认设备，行为与旧版一致）
 	// 注意：这里传入 channel.Secret 用于后续 rotate 时踢出旧连接
-	h.tunnelMgr.Register(channelID, channel.Secret, conn)
+	h.tunnelMgr.Register(channelID, deviceID, channel.Secret, conn)
 }
 
 // Status 查询指定 channel 的隧道是否在线（无需认证，公开接口）

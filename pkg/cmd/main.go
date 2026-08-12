@@ -54,7 +54,12 @@ func main() {
 	channelHandler := handlers.NewChannelHandler(channelSvcV2.ChannelService, rateLimitSvc, cfg)
 	proxyHandler := handlers.NewProxyHandler(channelSvcV2.ChannelService, rateLimitSvc, channelSvcV2)
 	oauthHandler := handlers.NewOAuthHandler(authSvc, redisSvc, cfg)
+	agentSvc := services.NewAgentService(dbSvc)
+	agentHandler := handlers.NewAgentHandler(agentSvc, channelSvcV2.ChannelService, redisSvc)
+	mailboxSvc := services.NewMailboxService(dbSvc)
+	mailboxHandler := handlers.NewMailboxHandler(mailboxSvc, agentSvc, channelSvcV2.ChannelService, tunnelMgr, redisSvc)
 	tunnelHandler := handlers.NewTunnelHandler(tunnelMgr, channelSvcV2.ChannelService, authSvc)
+	tunnelHandler.SetAgentService(agentSvc) // 握手时连接即注册
 	appVersionHandler := handlers.NewAppVersionHandler(appVersionSvc, "uploads/versions", cfg.BaseURL)
 
 	// 注入 TunnelManager 到 ProxyHandler
@@ -80,6 +85,7 @@ func main() {
 	r.GET("/", func(c *gin.Context) { c.HTML(200, "index.html", nil) })
 	r.GET("/login", func(c *gin.Context) { c.HTML(200, "login.html", nil) })
 	r.GET("/dashboard", func(c *gin.Context) { c.HTML(200, "dashboard.html", nil) })
+	r.GET("/discovery", func(c *gin.Context) { c.HTML(200, "discovery.html", nil) })
 	r.GET("/oauth-callback", func(c *gin.Context) { c.HTML(200, "oauth_callback.html", nil) })
 
 	// OAuth 回调
@@ -110,12 +116,32 @@ func main() {
 		// 应用版本检查（无需认证）
 		api.GET("/check-update", appVersionHandler.CheckUpdate)
 
+		// agent 注册/心跳（无需用户 token，使用 channel secret 的 HMAC 签名认证）
+		api.POST("/agents/register", agentHandler.Register)
+
+		// 公开目录（免登录，IP 限流）——只返回名片，不含 endpoint
+		api.GET("/discovery/agents", agentHandler.Discover)
+		api.GET("/discovery/agents/:agent_id", agentHandler.GetPublicCard)
+
+		// 双向信箱（caller 免登录+IP 限流；agent 侧 HMAC）
+		mb := api.Group("/mailbox/:agent_id")
+		{
+			mb.POST("/messages", mailboxHandler.DepositMessage)
+			mb.GET("/replies", mailboxHandler.ListReplies)
+			mb.POST("/replies/ack", mailboxHandler.AckReplies)
+			mb.GET("/pending", mailboxHandler.ClaimPending)
+			mb.POST("/ack", mailboxHandler.AckInbound)
+			mb.POST("/replies", mailboxHandler.DepositReply)
+		}
+
 		// 需要认证
 		authed := api.Group("")
 		authed.Use(handlers.AuthMiddleware(authSvc))
 		{
 			authed.POST("/tokens", authHandler.GenerateToken)
 			authed.DELETE("/tokens/current", authHandler.RevokeToken)
+			authed.PUT("/agents/:agent_id", agentHandler.Update)
+			authed.DELETE("/agents/:agent_id", agentHandler.Delete)
 
 			ch := authed.Group("/channels")
 			{
@@ -129,6 +155,7 @@ func main() {
 				ch.DELETE("/:id/rate-limits/:rule_id", channelHandler.DeleteRateLimitRule)
 				ch.GET("/:id/secret", channelHandler.GetSecret)             // 查看 tunnel secret
 				ch.POST("/:id/rotate-secret", tunnelHandler.RotateSecret)  // 重置 tunnel secret
+				ch.GET("/:id/agents", agentHandler.ListByChannel)          // channel 下的 agent 列表
 			}
 		}
 	}

@@ -28,6 +28,10 @@
                class="nav-item flex items-center py-2 px-3 rounded text-gray-300 hover:bg-gray-700 mb-1 active-nav">
                 <i class="fas fa-network-wired mr-3 w-5"></i> Channel 管理
             </a>
+            <a href="#" onclick="showSection('discovery'); loadDiscovery()"
+               class="nav-item flex items-center py-2 px-3 rounded text-gray-300 hover:bg-gray-700 mb-1">
+                <i class="fas fa-compass mr-3 w-5"></i> Agent 发现
+            </a>
             <a href="#" onclick="showSection('tokens')"
                class="nav-item flex items-center py-2 px-3 rounded text-gray-300 hover:bg-gray-700 mb-1">
                 <i class="fas fa-key mr-3 w-5"></i> Access Token
@@ -96,6 +100,34 @@
                     <i class="fas fa-network-wired text-4xl text-gray-300 mb-4"></i>
                     <p class="text-gray-500">还没有 Channel，点击"创建 Channel"开始</p>
                 </div>
+            </div>
+
+            <!-- Agent 发现（公开目录） -->
+            <div id="section-discovery" class="hidden">
+                <div class="flex justify-between items-center mb-6">
+                    <div>
+                        <h2 class="text-2xl font-bold text-gray-800">Agent 发现</h2>
+                        <p class="text-gray-500 text-sm mt-1">搜索公开的 Agent 名片（不含连接地址，连接需授权）</p>
+                    </div>
+                    <a href="/discovery" target="_blank" class="text-sm text-blue-600 hover:underline">
+                        <i class="fas fa-external-link-alt mr-1"></i>公开页面
+                    </a>
+                </div>
+                <div class="bg-white rounded-xl shadow-sm p-4 mb-4 flex gap-3">
+                    <input id="discovery-q" type="text" placeholder="搜索名称 / 描述 / agent_id…"
+                        class="flex-1 border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                        onkeydown="if(event.key==='Enter')loadDiscovery(1)">
+                    <button onclick="loadDiscovery(1)"
+                        class="bg-blue-600 text-white px-5 py-2 rounded-lg hover:bg-blue-700 text-sm">
+                        <i class="fas fa-search mr-1"></i>搜索
+                    </button>
+                </div>
+                <div id="discovery-list" class="grid gap-3"></div>
+                <div id="discovery-empty" class="hidden text-center py-12 text-gray-400">
+                    <i class="fas fa-robot text-3xl mb-3"></i>
+                    <p>没有找到公开 Agent</p>
+                </div>
+                <div id="discovery-pager" class="hidden mt-4 flex justify-center gap-2 text-sm"></div>
             </div>
 
             <!-- Access Token 管理 -->
@@ -376,6 +408,9 @@ Authorization: Bearer &lt;your_token&gt;
         function showSection(name) {
             document.querySelectorAll('[id^="section-"]').forEach(el => el.classList.add('hidden'));
             document.getElementById('section-' + name).classList.remove('hidden');
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active-nav'));
+            const nav = document.querySelector(`.nav-item[onclick*="'${name}'"]`);
+            if (nav) nav.classList.add('active-nav');
         }
 
         async function loadChannels() {
@@ -459,6 +494,10 @@ Authorization: Bearer &lt;your_token&gt;
                         <span><i class="fas fa-link mr-1"></i>${ch.stats?.active_connections || 0} 活跃连接</span>
                         <span><i class="far fa-clock mr-1"></i>创建于 ${formatDate(ch.created_at)}</span>
                     </div>
+                    <div id="agents-block-${ch.id}" class="hidden mt-3 pt-3 border-t border-gray-100">
+                        <div class="text-xs font-medium text-gray-500 mb-2"><i class="fas fa-robot mr-1"></i>已注册 Agent</div>
+                        <div id="agents-list-${ch.id}" class="space-y-1"></div>
+                    </div>
                 </div>
             `).join('');
 
@@ -466,6 +505,172 @@ Authorization: Bearer &lt;your_token&gt;
             channels
                 .filter(ch => ch.type === 'tunnel-http' || ch.type === 'tunnel-tcp' || ch.type === 'tunnel-ws')
                 .forEach(ch => checkTunnelStatus(ch.id));
+
+            // 异步加载每个 channel 的 agent 列表
+            channels.forEach(ch => loadChannelAgents(ch.id));
+        }
+
+        // 加载并渲染 channel 下已注册的 agent 列表（无 agent 时区块保持隐藏）
+        async function loadChannelAgents(channelID) {
+            try {
+                const resp = await fetch(`${API_BASE}/channels/${channelID}/agents`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                if (!resp.ok) return;
+                const data = await resp.json();
+                const agents = data.agents || [];
+                if (agents.length === 0) return;
+
+                document.getElementById(`agents-block-${channelID}`).classList.remove('hidden');
+                document.getElementById(`agents-list-${channelID}`).innerHTML = agents.map(a => `
+                    <div class="flex items-center gap-2 text-xs bg-gray-50 rounded px-2 py-1.5">
+                        <span class="w-2 h-2 rounded-full flex-shrink-0 ${a.online ? 'bg-green-500' : 'bg-gray-300'}" title="${a.online ? '在线' : '离线'}"></span>
+                        <span class="font-medium text-gray-700">${escapeHtml(a.name || '(未命名)')}</span>
+                        <code class="text-gray-400">${escapeHtml(a.agent_id)}</code>
+                        ${a.agent_fp ? `<code class="text-gray-400" title="公钥指纹">fp:${escapeHtml(a.agent_fp)}</code>` : ''}
+                        <span class="text-gray-400 ml-auto flex-shrink-0">并发 ${a.active_count}/${a.capacity}</span>
+                        <button onclick="toggleAgentPublic('${escapeHtml(a.agent_id)}', ${a.is_public}, '${escapeHtml(a.name || '')}')"
+                            class="px-1.5 py-0.5 rounded flex-shrink-0 ${a.is_public ? 'bg-green-100 text-green-600 hover:bg-green-200' : 'bg-gray-100 text-gray-400 hover:bg-gray-200'}"
+                            title="${a.is_public ? '点击设为私有' : '点击设为公开'}">
+                            ${a.is_public ? '公开' : '私有'}
+                        </button>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error(`Failed to load agents for ${channelID}:`, err);
+            }
+        }
+
+        // 切换公开/私有；设公开时若无名字则弹窗要求填写
+        async function toggleAgentPublic(agentID, currentlyPublic, currentName) {
+            const makePublic = !currentlyPublic;
+            let name = currentName;
+            let description = undefined;
+
+            if (makePublic && !name) {
+                name = prompt('公开前请为 Agent 取一个名字：');
+                if (!name || !name.trim()) {
+                    alert('公开时名字不能为空');
+                    return;
+                }
+                name = name.trim();
+                const desc = prompt('可选：填写一句话描述（直接取消跳过）');
+                if (desc !== null && desc.trim()) description = desc.trim();
+            }
+
+            const body = { is_public: makePublic };
+            if (makePublic && name) body.name = name;
+            if (description !== undefined) body.description = description;
+
+            try {
+                const resp = await fetch(`${API_BASE}/agents/${encodeURIComponent(agentID)}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Authorization': `Bearer ${token}`,
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(body),
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    alert(data.error || '更新失败');
+                    return;
+                }
+                // 刷新当前页所有 channel 的 agent 列表
+                channels.forEach(ch => loadChannelAgents(ch.id));
+            } catch (err) {
+                alert('网络错误：' + err.message);
+            }
+        }
+
+        // ── Agent 发现 ────────────────────────────────────────────────────────
+        let discoveryPage = 1;
+
+        async function loadDiscovery(page) {
+            if (page) discoveryPage = page;
+            const q = (document.getElementById('discovery-q')?.value || '').trim();
+            const list = document.getElementById('discovery-list');
+            const empty = document.getElementById('discovery-empty');
+            const pager = document.getElementById('discovery-pager');
+            try {
+                const params = new URLSearchParams({ page: String(discoveryPage), page_size: '12' });
+                if (q) params.set('q', q);
+                const resp = await fetch(`${API_BASE}/discovery/agents?${params}`);
+                const data = await resp.json();
+                if (!resp.ok) {
+                    list.innerHTML = `<p class="text-red-500 text-sm">${escapeHtml(data.error || '搜索失败')}</p>`;
+                    return;
+                }
+                const agents = data.agents || [];
+                if (agents.length === 0) {
+                    list.innerHTML = '';
+                    empty.classList.remove('hidden');
+                    pager.classList.add('hidden');
+                    return;
+                }
+                empty.classList.add('hidden');
+                list.innerHTML = agents.map(a => `
+                    <div class="bg-white rounded-xl shadow-sm p-4 flex items-start gap-3">
+                        <div class="w-10 h-10 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center flex-shrink-0">
+                            <i class="fas fa-robot"></i>
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2 mb-1">
+                                <h3 class="font-semibold text-gray-800">${escapeHtml(a.name)}</h3>
+                                <span class="w-2 h-2 rounded-full ${a.online ? 'bg-green-500' : 'bg-gray-300'}" title="${a.online ? '在线' : '离线'}"></span>
+                                <span class="text-xs text-gray-400">${a.online ? '在线' : '离线'}</span>
+                            </div>
+                            <p class="text-sm text-gray-500 mb-1">${escapeHtml(a.description || '暂无描述')}</p>
+                            <div class="flex flex-wrap gap-2 text-xs text-gray-400">
+                                <code>${escapeHtml(a.agent_id)}</code>
+                                ${a.agent_fp ? `<code title="公钥指纹">fp:${escapeHtml(a.agent_fp)}</code>` : ''}
+                                <span>容量 ${a.capacity}</span>
+                            </div>
+                        </div>
+                        <button onclick="showAgentCard('${escapeHtml(a.agent_id)}')"
+                            class="text-sm text-blue-600 hover:underline flex-shrink-0">名片</button>
+                    </div>
+                `).join('');
+
+                const totalPages = Math.max(1, Math.ceil((data.total || 0) / (data.page_size || 12)));
+                if (totalPages > 1) {
+                    pager.classList.remove('hidden');
+                    pager.innerHTML = `
+                        <button ${discoveryPage <= 1 ? 'disabled' : ''} onclick="loadDiscovery(${discoveryPage - 1})"
+                            class="px-3 py-1 rounded border ${discoveryPage <= 1 ? 'text-gray-300' : 'hover:bg-gray-50'}">上一页</button>
+                        <span class="px-2 text-gray-500">${discoveryPage} / ${totalPages}</span>
+                        <button ${discoveryPage >= totalPages ? 'disabled' : ''} onclick="loadDiscovery(${discoveryPage + 1})"
+                            class="px-3 py-1 rounded border ${discoveryPage >= totalPages ? 'text-gray-300' : 'hover:bg-gray-50'}">下一页</button>
+                    `;
+                } else {
+                    pager.classList.add('hidden');
+                }
+            } catch (err) {
+                list.innerHTML = `<p class="text-red-500 text-sm">网络错误：${escapeHtml(err.message)}</p>`;
+            }
+        }
+
+        async function showAgentCard(agentID) {
+            try {
+                const resp = await fetch(`${API_BASE}/discovery/agents/${encodeURIComponent(agentID)}`);
+                const a = await resp.json();
+                if (!resp.ok) {
+                    alert(a.error || '未找到');
+                    return;
+                }
+                alert(
+                    `名片\n\n` +
+                    `名称：${a.name}\n` +
+                    `ID：${a.agent_id}\n` +
+                    `指纹：${a.agent_fp || '(无)'}\n` +
+                    `描述：${a.description || '(无)'}\n` +
+                    `状态：${a.online ? '在线' : '离线'}\n` +
+                    `容量：${a.capacity}\n\n` +
+                    `（连接地址需授权后才会提供）`
+                );
+            } catch (err) {
+                alert('网络错误：' + err.message);
+            }
         }
 
         function updateStats() {

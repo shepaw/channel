@@ -27,6 +27,7 @@ const (
 	TunnelMsgWsConnect TunnelMessageType = "ws_connect" // server→agent: establish WS connection
 	TunnelMsgWsData    TunnelMessageType = "ws_data"    // bidirectional: transport WS frame data
 	TunnelMsgWsClose   TunnelMessageType = "ws_close"   // bidirectional: close WS connection
+	TunnelMsgMailWaiting TunnelMessageType = "mail_waiting" // server→agent: mailbox has pending inbound
 )
 
 // TunnelMessage 隧道消息结构
@@ -40,11 +41,13 @@ type TunnelMessage struct {
 	Body      string            `json:"body,omitempty"` // base64 编码
 	Error     string            `json:"error,omitempty"`
 	WsMsgType int               `json:"ws_msg_type,omitempty"` // websocket.TextMessage=1 / BinaryMessage=2
+	AgentID   string            `json:"agent_id,omitempty"`    // mail_waiting 等控制消息
 }
 
-// TunnelConn 代表一个已连接的本地 agent
+// TunnelConn 代表一个已连接的本地 agent（某台设备的一条隧道连接）
 type TunnelConn struct {
 	channelID  string
+	deviceID   string // 连接来源设备；空串表示旧客户端（单一默认设备）
 	secret     string // 连接时使用的 secret，用于 rotate 后踢出旧连接
 	conn       *websocket.Conn
 	mu         sync.Mutex
@@ -55,9 +58,16 @@ type TunnelConn struct {
 	closeCh    chan struct{}
 }
 
+// connSet 一个 channel 下的全部设备连接（多设备共存，请求轮询分发）
+type connSet struct {
+	mu    sync.RWMutex
+	conns map[string]*TunnelConn // deviceID -> conn
+	rr    uint64                 // round-robin 计数器
+}
+
 // TunnelManager 管理所有活跃的隧道连接
 type TunnelManager struct {
-	tunnels sync.Map // channelID -> *TunnelConn
+	tunnels sync.Map // channelID -> *connSet
 }
 
 var globalStreamID int64
@@ -66,10 +76,13 @@ func NewTunnelManager() *TunnelManager {
 	return &TunnelManager{}
 }
 
-// Register 注册一条隧道连接（secret 用于后续 rotate 踢出验证）
-func (tm *TunnelManager) Register(channelID, secret string, conn *websocket.Conn) *TunnelConn {
+// Register 注册一条隧道连接（secret 用于后续 rotate 踢出验证）。
+// 同一 channel 下按 deviceID 区分设备：同一设备重连只踢掉自己的旧连接，
+// 不同设备共存；deviceID 为空（旧客户端）时等价于单一默认设备，行为与旧版一致。
+func (tm *TunnelManager) Register(channelID, deviceID, secret string, conn *websocket.Conn) *TunnelConn {
 	tc := &TunnelConn{
 		channelID:  channelID,
+		deviceID:   deviceID,
 		secret:     secret,
 		conn:       conn,
 		streams:    make(map[int64]chan *TunnelMessage),
@@ -77,50 +90,148 @@ func (tm *TunnelManager) Register(channelID, secret string, conn *websocket.Conn
 		closeCh:    make(chan struct{}),
 	}
 
-	// 如果有旧连接，先踢掉
-	if old, ok := tm.tunnels.LoadAndDelete(channelID); ok {
-		old.(*TunnelConn).close()
+	set := tm.getOrCreateSet(channelID)
+	set.mu.Lock()
+	if old, ok := set.conns[deviceID]; ok {
+		old.close() // 同设备重连：只踢掉自己的旧连接
 	}
+	set.conns[deviceID] = tc
+	set.mu.Unlock()
 
-	tm.tunnels.Store(channelID, tc)
-
-	go tc.readLoop()
+	go tc.readLoop(func() { tm.removeConn(channelID, deviceID, tc) })
 	go tc.pingLoop()
 
 	return tc
 }
 
-// Unregister 注销隧道连接
+func (tm *TunnelManager) getOrCreateSet(channelID string) *connSet {
+	if v, ok := tm.tunnels.Load(channelID); ok {
+		return v.(*connSet)
+	}
+	set := &connSet{conns: make(map[string]*TunnelConn)}
+	actual, _ := tm.tunnels.LoadOrStore(channelID, set)
+	return actual.(*connSet)
+}
+
+// removeConn 在连接退出时从集合中移除自己（仅当集合里仍是这条连接，
+// 避免误删同设备重连后的新连接）。空集合不删除——保留在 map 中无害
+// （Get 对空集合返回 false），可避免与并发 Register 的删除竞态。
+func (tm *TunnelManager) removeConn(channelID, deviceID string, tc *TunnelConn) {
+	v, ok := tm.tunnels.Load(channelID)
+	if !ok {
+		return
+	}
+	set := v.(*connSet)
+	set.mu.Lock()
+	if cur, ok := set.conns[deviceID]; ok && cur == tc {
+		delete(set.conns, deviceID)
+	}
+	set.mu.Unlock()
+}
+
+// Unregister 注销 channel 的全部隧道连接
 func (tm *TunnelManager) Unregister(channelID string) {
 	if v, ok := tm.tunnels.LoadAndDelete(channelID); ok {
-		v.(*TunnelConn).close()
+		set := v.(*connSet)
+		set.mu.Lock()
+		for _, tc := range set.conns {
+			tc.close()
+		}
+		set.conns = make(map[string]*TunnelConn)
+		set.mu.Unlock()
 	}
 }
 
-// KickIfSecret 如果当前连接使用的是指定 secret，则踢掉它（用于 rotate secret 后立即生效）
+// KickIfSecret 踢掉该 channel 下所有使用指定 secret 的连接（rotate secret 后立即生效）
 func (tm *TunnelManager) KickIfSecret(channelID, oldSecret string) {
-	if v, ok := tm.tunnels.Load(channelID); ok {
-		tc := v.(*TunnelConn)
+	v, ok := tm.tunnels.Load(channelID)
+	if !ok {
+		return
+	}
+	set := v.(*connSet)
+	set.mu.Lock()
+	for deviceID, tc := range set.conns {
 		if tc.secret == oldSecret {
-			tm.tunnels.Delete(channelID)
+			delete(set.conns, deviceID)
 			tc.close()
 		}
 	}
+	set.mu.Unlock()
 }
 
-// Get 获取指定 channel 的隧道连接
+// Get 轮询获取指定 channel 的一条在线隧道连接（多设备负载分摊；
+// 单个请求/WS 会话粘性在选中的连接上，stream 状态随连接隔离）
 func (tm *TunnelManager) Get(channelID string) (*TunnelConn, bool) {
 	v, ok := tm.tunnels.Load(channelID)
 	if !ok {
 		return nil, false
 	}
-	return v.(*TunnelConn), true
+	set := v.(*connSet)
+	set.mu.RLock()
+	defer set.mu.RUnlock()
+
+	n := len(set.conns)
+	if n == 0 {
+		return nil, false
+	}
+	// round-robin：从 rr 位置开始找第一条未关闭的连接（rr 用原子操作，读锁下安全）
+	devices := make([]string, 0, n)
+	for d := range set.conns {
+		devices = append(devices, d)
+	}
+	start := int(atomic.AddUint64(&set.rr, 1) % uint64(len(devices)))
+	for i := 0; i < len(devices); i++ {
+		tc := set.conns[devices[(start+i)%len(devices)]]
+		if tc != nil && !tc.closed {
+			return tc, true
+		}
+	}
+	return nil, false
 }
 
-// IsOnline 判断 channel 是否在线
+// IsOnline 判断 channel 是否在线（任一设备连接存活即在线）
 func (tm *TunnelManager) IsOnline(channelID string) bool {
-	_, ok := tm.tunnels.Load(channelID)
+	_, ok := tm.Get(channelID)
 	return ok
+}
+
+// OnlineDevices 返回 channel 当前在线的设备 ID 列表
+func (tm *TunnelManager) OnlineDevices(channelID string) []string {
+	v, ok := tm.tunnels.Load(channelID)
+	if !ok {
+		return nil
+	}
+	set := v.(*connSet)
+	set.mu.RLock()
+	defer set.mu.RUnlock()
+	devices := make([]string, 0, len(set.conns))
+	for d, tc := range set.conns {
+		if !tc.closed {
+			devices = append(devices, d)
+		}
+	}
+	return devices
+}
+
+// BroadcastControl 向 channel 下所有在线设备广播一条控制消息（如 mail_waiting）。
+// 失败静默忽略——控制消息是优化，不是可靠性路径（agent 仍会定时拉信箱）。
+func (tm *TunnelManager) BroadcastControl(channelID string, msg *TunnelMessage) {
+	v, ok := tm.tunnels.Load(channelID)
+	if !ok {
+		return
+	}
+	set := v.(*connSet)
+	set.mu.RLock()
+	conns := make([]*TunnelConn, 0, len(set.conns))
+	for _, tc := range set.conns {
+		if tc != nil && !tc.closed {
+			conns = append(conns, tc)
+		}
+	}
+	set.mu.RUnlock()
+	for _, tc := range conns {
+		_ = tc.send(msg)
+	}
 }
 
 // ForwardHTTP 通过隧道转发 HTTP 请求，返回响应（超时 30s）
@@ -294,8 +405,15 @@ func (tc *TunnelConn) unregisterStream(streamID int64) {
 	tc.streamsMu.Unlock()
 }
 
-func (tc *TunnelConn) readLoop() {
-	defer tc.close()
+// readLoop 读取 agent 上行消息并分发到各 stream；退出时调用 onExit
+// （让 TunnelManager 把自己从连接集合中摘除，保证 IsOnline 反映真实状态）
+func (tc *TunnelConn) readLoop(onExit func()) {
+	defer func() {
+		tc.close()
+		if onExit != nil {
+			onExit()
+		}
+	}()
 
 	for {
 		_, data, err := tc.conn.ReadMessage()
