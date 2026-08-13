@@ -44,6 +44,7 @@ type RegisterAgentParams struct {
 	Name        string
 	Description string
 	AgentFP     string
+	AgentPubKey string // base64 raw 32-byte；批准后下发给 caller
 	PathPrefix  string
 	DeviceID    string
 	Capacity    int // <=0 表示不变/默认
@@ -85,6 +86,9 @@ func (s *AgentService) Register(p RegisterAgentParams) (*models.Agent, error) {
 		if p.AgentFP != "" {
 			agent.AgentFP = p.AgentFP
 		}
+		if p.AgentPubKey != "" {
+			agent.AgentPubKey = p.AgentPubKey
+		}
 		if p.PathPrefix != "" {
 			agent.PathPrefix = p.PathPrefix
 		}
@@ -113,6 +117,7 @@ func (s *AgentService) Register(p RegisterAgentParams) (*models.Agent, error) {
 			Name:        p.Name,
 			Description: p.Description,
 			AgentFP:     p.AgentFP,
+			AgentPubKey: p.AgentPubKey,
 			PathPrefix:  p.PathPrefix,
 			DeviceID:    p.DeviceID,
 			Capacity:    capacity,

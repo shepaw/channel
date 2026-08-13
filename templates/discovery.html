@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Agent 发现 · Channel Service</title>
+    <title>Agent 发现</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
@@ -37,9 +37,8 @@
         <div id="pager" class="hidden mt-6 flex justify-center gap-3 text-sm"></div>
     </main>
 
-    <!-- 名片弹层 -->
     <div id="card-modal" class="hidden fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onclick="if(event.target===this)closeCard()">
-        <div class="bg-white rounded-2xl shadow-xl max-w-md w-full p-6">
+        <div class="bg-white rounded-2xl shadow-xl max-w-md w-full p-6 max-h-[90vh] overflow-y-auto">
             <div class="flex items-start gap-4 mb-4">
                 <div class="w-12 h-12 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center text-xl">
                     <i class="fas fa-robot"></i>
@@ -57,14 +56,25 @@
                 <div class="flex gap-2"><dt class="text-gray-400 w-16 flex-shrink-0">容量</dt><dd id="card-cap" class="text-gray-700"></dd></div>
             </dl>
             <p class="mt-5 text-xs text-amber-700 bg-amber-50 rounded-lg px-3 py-2">
-                <i class="fas fa-lock mr-1"></i>名片可见，连接需授权。授权功能即将上线（P3）。
+                <i class="fas fa-lock mr-1"></i>名片可见。填写你的 Noise 公钥与指纹发起申请；owner 批准后可在 Shepaw App 收取连接信息（无需再扫配对码）。
             </p>
+            <div class="mt-4 space-y-2">
+                <input id="req-name" type="text" placeholder="你的昵称（可选）" class="w-full border rounded-lg px-3 py-2 text-sm">
+                <input id="req-fp" type="text" placeholder="caller_fp（16 位 hex）" class="w-full border rounded-lg px-3 py-2 text-sm font-mono">
+                <input id="req-pk" type="text" placeholder="caller_pubkey（base64）" class="w-full border rounded-lg px-3 py-2 text-sm font-mono">
+                <input id="req-msg" type="text" placeholder="留言（可选）" class="w-full border rounded-lg px-3 py-2 text-sm">
+                <button onclick="submitAccessRequest()" class="w-full bg-indigo-600 text-white rounded-lg py-2 text-sm hover:bg-indigo-700">
+                    申请接入
+                </button>
+                <p id="req-result" class="text-xs text-gray-500"></p>
+            </div>
         </div>
     </div>
 
     <script>
         const API = '/api/v1';
         let page = 1;
+        let currentCardAgentId = '';
 
         function escapeHtml(str) {
             const d = document.createElement('div');
@@ -138,6 +148,7 @@
                 const resp = await fetch(`${API}/discovery/agents/${encodeURIComponent(agentID)}`);
                 const a = await resp.json();
                 if (!resp.ok) { alert(a.error || '未找到'); return; }
+                currentCardAgentId = a.agent_id;
                 document.getElementById('card-name').textContent = a.name;
                 document.getElementById('card-status').textContent = a.online ? '● 在线' : '○ 离线';
                 document.getElementById('card-status').className = 'text-sm ' + (a.online ? 'text-green-600' : 'text-gray-400');
@@ -145,6 +156,7 @@
                 document.getElementById('card-id').textContent = a.agent_id;
                 document.getElementById('card-fp').textContent = a.agent_fp || '(无)';
                 document.getElementById('card-cap').textContent = a.capacity;
+                document.getElementById('req-result').textContent = '';
                 document.getElementById('card-modal').classList.remove('hidden');
             } catch (err) {
                 alert('网络错误：' + err.message);
@@ -155,7 +167,40 @@
             document.getElementById('card-modal').classList.add('hidden');
         }
 
-        // 从 URL ?q= 预填
+        async function submitAccessRequest() {
+            const result = document.getElementById('req-result');
+            const body = {
+                agent_id: currentCardAgentId,
+                caller_fp: document.getElementById('req-fp').value.trim(),
+                caller_pubkey: document.getElementById('req-pk').value.trim(),
+                caller_name: document.getElementById('req-name').value.trim(),
+                message: document.getElementById('req-msg').value.trim(),
+            };
+            if (!body.caller_fp || !body.caller_pubkey) {
+                result.textContent = '请填写 caller_fp 与 caller_pubkey（可在 Shepaw App 中复制）';
+                result.className = 'text-xs text-red-500';
+                return;
+            }
+            try {
+                const resp = await fetch(`${API}/access-requests`, {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    result.textContent = data.error || '申请失败';
+                    result.className = 'text-xs text-red-500';
+                    return;
+                }
+                result.textContent = `已提交（${data.status}）。批准后请在 App 中收取连接信息。`;
+                result.className = 'text-xs text-green-600';
+            } catch (err) {
+                result.textContent = '网络错误：' + err.message;
+                result.className = 'text-xs text-red-500';
+            }
+        }
+
         const urlQ = new URLSearchParams(location.search).get('q');
         if (urlQ) document.getElementById('q').value = urlQ;
         search(1);

@@ -28,6 +28,7 @@ const (
 	TunnelMsgWsData    TunnelMessageType = "ws_data"    // bidirectional: transport WS frame data
 	TunnelMsgWsClose   TunnelMessageType = "ws_close"   // bidirectional: close WS connection
 	TunnelMsgMailWaiting TunnelMessageType = "mail_waiting" // server→agent: mailbox has pending inbound
+	TunnelMsgAccessGrant TunnelMessageType = "access_grant" // server→agent: access grant changed, sync peers
 )
 
 // TunnelMessage 隧道消息结构

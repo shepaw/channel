@@ -21,6 +21,7 @@ type Agent struct {
 	Name        string         `gorm:"type:varchar(100)"                  json:"name"` // 公开时必填；私有可空
 	Description string         `gorm:"type:text"                          json:"description"`
 	AgentFP     string         `gorm:"type:varchar(32);index"             json:"agent_fp"`   // 公钥指纹（16 hex），Noise 配对用
+	AgentPubKey string         `gorm:"type:varchar(64)"                   json:"agent_pubkey,omitempty"` // base64 raw 32-byte；批准后下发给 caller
 	PathPrefix  string         `gorm:"type:varchar(128)"                  json:"path_prefix"` // hub 模式路由前缀，如 /p/<instanceId>/
 	DeviceID    string         `gorm:"type:varchar(64)"                   json:"device_id"`   // 最近连接设备（legacy 握手模式）
 	Capacity    int            `gorm:"default:5"                          json:"capacity"`    // 并发对话容量，默认 5，可改

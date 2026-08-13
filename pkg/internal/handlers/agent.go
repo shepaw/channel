@@ -67,6 +67,7 @@ type RegisterAgentRequest struct {
 	ChannelID   string `json:"channel_id" binding:"required"`
 	AgentID     string `json:"agent_id"   binding:"required"`
 	AgentFP     string `json:"agent_fp"`
+	AgentPubKey string `json:"agent_pubkey"`
 	Name        string `json:"name"        binding:"max=100"`
 	Description string `json:"description"`
 	PathPrefix  string `json:"path_prefix" binding:"max=128"`
@@ -121,6 +122,7 @@ func (h *AgentHandler) Register(c *gin.Context) {
 		Name:        req.Name,
 		Description: req.Description,
 		AgentFP:     req.AgentFP,
+		AgentPubKey: req.AgentPubKey,
 		PathPrefix:  req.PathPrefix,
 		DeviceID:    req.DeviceID,
 		Capacity:    req.Capacity,

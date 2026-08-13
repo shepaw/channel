@@ -93,6 +93,7 @@ func (h *TunnelHandler) Connect(c *gin.Context) {
 	// agent 注册扩展参数（全部可选；不带则行为与旧版完全一致）
 	agentID := c.Query("agent_id")
 	agentFP := c.Query("agent_fp")
+	agentPubKey := c.Query("agent_pubkey")
 	agentName := c.Query("name")
 	deviceID := c.Query("device_id")
 	capacity, _ := strconv.Atoi(c.Query("capacity"))
@@ -144,12 +145,13 @@ func (h *TunnelHandler) Connect(c *gin.Context) {
 	// 打断既有转发功能，冲突通过 dashboard 由 owner 处理。
 	if agentID != "" && h.agentSvc != nil {
 		if _, err := h.agentSvc.Register(services.RegisterAgentParams{
-			AgentID:   agentID,
-			ChannelID: channelID,
-			Name:      agentName,
-			AgentFP:   agentFP,
-			DeviceID:  deviceID,
-			Capacity:  capacity,
+			AgentID:     agentID,
+			ChannelID:   channelID,
+			Name:        agentName,
+			AgentFP:     agentFP,
+			AgentPubKey: agentPubKey,
+			DeviceID:    deviceID,
+			Capacity:    capacity,
 		}); err != nil {
 			log.Printf("⚠️  Agent register on tunnel connect failed: channel=%s agent=%s err=%v", channelID, agentID, err)
 		} else {

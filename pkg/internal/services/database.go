@@ -51,6 +51,7 @@ func NewDatabaseService(dbURL string) (*DatabaseService, error) {
 		&models.AppVersion{},
 		&models.Agent{},
 		&models.MailboxMessage{},
+		&models.AgentAccessGrant{},
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to auto migrate: %v", err)

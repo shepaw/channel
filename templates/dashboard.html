@@ -534,10 +534,90 @@ Authorization: Bearer &lt;your_token&gt;
                             title="${a.is_public ? '点击设为私有' : '点击设为公开'}">
                             ${a.is_public ? '公开' : '私有'}
                         </button>
+                        <button onclick="openAccessRequests('${escapeHtml(a.agent_id)}', '${escapeHtml(a.name || a.agent_id)}')"
+                            class="px-1.5 py-0.5 rounded flex-shrink-0 bg-indigo-50 text-indigo-600 hover:bg-indigo-100"
+                            title="接入申请">
+                            授权
+                        </button>
                     </div>
                 `).join('');
             } catch (err) {
                 console.error(`Failed to load agents for ${channelID}:`, err);
+            }
+        }
+
+        // ── 接入授权审批 ──────────────────────────────────────────────────────
+        async function openAccessRequests(agentID, agentName) {
+            const statusFilter = '';
+            try {
+                const q = statusFilter ? `?status=${statusFilter}` : '';
+                const resp = await fetch(`${API_BASE}/agents/${encodeURIComponent(agentID)}/access-requests${q}`, {
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                const data = await resp.json();
+                if (!resp.ok) { alert(data.error || '加载失败'); return; }
+                const rows = data.requests || [];
+                const body = rows.length === 0
+                    ? '<p class="text-gray-400 text-sm py-4 text-center">暂无接入申请</p>'
+                    : rows.map(r => `
+                        <div class="border rounded-lg p-3 text-sm mb-2">
+                            <div class="flex items-center gap-2 mb-1">
+                                <span class="font-medium">${escapeHtml(r.caller_name || '(未命名)')}</span>
+                                <code class="text-xs text-gray-400">fp:${escapeHtml(r.caller_fp)}</code>
+                                <span class="ml-auto text-xs px-1.5 py-0.5 rounded ${
+                                    r.status === 'pending' ? 'bg-amber-100 text-amber-700' :
+                                    r.status === 'approved' ? 'bg-green-100 text-green-700' :
+                                    r.status === 'revoked' ? 'bg-gray-100 text-gray-500' :
+                                    'bg-red-100 text-red-600'
+                                }">${escapeHtml(r.status)}</span>
+                            </div>
+                            ${r.message ? `<p class="text-gray-500 mb-2">${escapeHtml(r.message)}</p>` : ''}
+                            <div class="flex gap-2">
+                                ${r.status === 'pending' ? `
+                                    <button onclick="decideAccess('${escapeHtml(r.id)}','approve','${escapeHtml(agentID)}','${escapeHtml(agentName)}')"
+                                        class="px-2 py-1 bg-green-600 text-white rounded text-xs">批准</button>
+                                    <button onclick="decideAccess('${escapeHtml(r.id)}','reject','${escapeHtml(agentID)}','${escapeHtml(agentName)}')"
+                                        class="px-2 py-1 bg-gray-200 text-gray-700 rounded text-xs">拒绝</button>
+                                ` : ''}
+                                ${r.status === 'approved' ? `
+                                    <button onclick="decideAccess('${escapeHtml(r.id)}','revoke','${escapeHtml(agentID)}','${escapeHtml(agentName)}')"
+                                        class="px-2 py-1 bg-red-50 text-red-600 rounded text-xs">撤销</button>
+                                ` : ''}
+                            </div>
+                        </div>
+                    `).join('');
+                const overlay = document.createElement('div');
+                overlay.id = 'access-modal';
+                overlay.className = 'fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4';
+                overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+                overlay.innerHTML = `
+                    <div class="bg-white rounded-xl shadow-xl max-w-lg w-full p-5 max-h-[80vh] overflow-y-auto">
+                        <div class="flex items-center mb-4">
+                            <h3 class="font-bold text-gray-800">接入申请 — ${escapeHtml(agentName)}</h3>
+                            <button onclick="document.getElementById('access-modal').remove()" class="ml-auto text-gray-400 hover:text-gray-600">
+                                <i class="fas fa-times"></i>
+                            </button>
+                        </div>
+                        ${body}
+                    </div>`;
+                document.getElementById('access-modal')?.remove();
+                document.body.appendChild(overlay);
+            } catch (err) {
+                alert('网络错误：' + err.message);
+            }
+        }
+
+        async function decideAccess(id, action, agentID, agentName) {
+            try {
+                const resp = await fetch(`${API_BASE}/access-requests/${encodeURIComponent(id)}/${action}`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}` },
+                });
+                const data = await resp.json();
+                if (!resp.ok) { alert(data.error || '操作失败'); return; }
+                openAccessRequests(agentID, agentName);
+            } catch (err) {
+                alert('网络错误：' + err.message);
             }
         }
 

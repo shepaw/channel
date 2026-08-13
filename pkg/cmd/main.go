@@ -56,8 +56,10 @@ func main() {
 	oauthHandler := handlers.NewOAuthHandler(authSvc, redisSvc, cfg)
 	agentSvc := services.NewAgentService(dbSvc)
 	agentHandler := handlers.NewAgentHandler(agentSvc, channelSvcV2.ChannelService, redisSvc)
+	accessSvc := services.NewAccessService(dbSvc, agentSvc)
 	mailboxSvc := services.NewMailboxService(dbSvc)
 	mailboxHandler := handlers.NewMailboxHandler(mailboxSvc, agentSvc, channelSvcV2.ChannelService, tunnelMgr, redisSvc)
+	accessHandler := handlers.NewAccessHandler(accessSvc, agentSvc, channelSvcV2.ChannelService, tunnelMgr, redisSvc, cfg.BaseURL)
 	tunnelHandler := handlers.NewTunnelHandler(tunnelMgr, channelSvcV2.ChannelService, authSvc)
 	tunnelHandler.SetAgentService(agentSvc) // 握手时连接即注册
 	appVersionHandler := handlers.NewAppVersionHandler(appVersionSvc, "uploads/versions", cfg.BaseURL)
@@ -123,6 +125,10 @@ func main() {
 		api.GET("/discovery/agents", agentHandler.Discover)
 		api.GET("/discovery/agents/:agent_id", agentHandler.GetPublicCard)
 
+		// 接入申请（caller 免登录+IP 限流；批准后才下发 endpoint）
+		api.POST("/access-requests", accessHandler.CreateRequest)
+		api.GET("/access-requests/mine", accessHandler.GetMine)
+
 		// 双向信箱（caller 免登录+IP 限流；agent 侧 HMAC）
 		mb := api.Group("/mailbox/:agent_id")
 		{
@@ -134,6 +140,9 @@ func main() {
 			mb.POST("/replies", mailboxHandler.DepositReply)
 		}
 
+		// agent 拉取已批准/撤销的授权（HMAC）
+		api.GET("/agents/:agent_id/grants", accessHandler.ListGrantsForAgent)
+
 		// 需要认证
 		authed := api.Group("")
 		authed.Use(handlers.AuthMiddleware(authSvc))
@@ -142,6 +151,10 @@ func main() {
 			authed.DELETE("/tokens/current", authHandler.RevokeToken)
 			authed.PUT("/agents/:agent_id", agentHandler.Update)
 			authed.DELETE("/agents/:agent_id", agentHandler.Delete)
+			authed.GET("/agents/:agent_id/access-requests", accessHandler.ListByAgent)
+			authed.POST("/access-requests/:id/approve", accessHandler.Approve)
+			authed.POST("/access-requests/:id/reject", accessHandler.Reject)
+			authed.POST("/access-requests/:id/revoke", accessHandler.Revoke)
 
 			ch := authed.Group("/channels")
 			{
