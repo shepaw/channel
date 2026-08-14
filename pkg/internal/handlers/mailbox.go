@@ -7,21 +7,24 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/edenzou/channel-service/pkg/internal/models"
 	"github.com/edenzou/channel-service/pkg/internal/services"
 	"github.com/gin-gonic/gin"
 )
 
-// MailboxHandler channel 双向信箱 API。
+// MailboxHandler 云端收件箱 API（shepaw ↔ agent-bridge 异步信箱）。
 //
 // Caller（免登录，IP 限流）：
-//   POST   /api/v1/mailbox/:agent_id/messages
-//   GET    /api/v1/mailbox/:agent_id/replies?caller_fp=
-//   POST   /api/v1/mailbox/:agent_id/replies/ack
+//   POST   /api/v1/mailbox/:target_id/messages
+//   GET    /api/v1/mailbox/:target_id/replies?caller_fp=
+//   POST   /api/v1/mailbox/:target_id/replies/ack
+//   GET    /api/v1/inbox/replies?caller_fp=          （跨 target 统一收取）
+//   POST   /api/v1/inbox/replies/ack
 //
-// Agent（channel secret HMAC）：
-//   GET    /api/v1/mailbox/:agent_id/pending
-//   POST   /api/v1/mailbox/:agent_id/ack
-//   POST   /api/v1/mailbox/:agent_id/replies
+// Agent/group handler（channel secret HMAC）：
+//   GET    /api/v1/mailbox/:target_id/pending
+//   POST   /api/v1/mailbox/:target_id/ack
+//   POST   /api/v1/mailbox/:target_id/replies
 type MailboxHandler struct {
 	mailboxSvc *services.MailboxService
 	agentSvc   *services.AgentService
@@ -48,25 +51,30 @@ func NewMailboxHandler(
 	}
 }
 
-const mailboxRateLimit = 30 // 每 IP 每分钟
-
-// ── Caller APIs ──────────────────────────────────────────────────────────────
+const mailboxRateLimit = 30
 
 type depositMessageRequest struct {
-	CallerFP   string `json:"caller_fp"  binding:"required"`
+	TargetType string `json:"target_type"` // agent | group，默认 agent
+	CallerFP   string `json:"caller_fp" binding:"required"`
 	MessageID  string `json:"message_id"`
+	RequestID  string `json:"request_id"`
 	SessionID  string `json:"session_id"`
+	GroupID    string `json:"group_id"`
+	Kind       string `json:"kind"` // chat | article
 	Ciphertext string `json:"ciphertext" binding:"required"`
 }
 
-// DepositMessage caller 留言（密文）
-// POST /api/v1/mailbox/:agent_id/messages
+// DepositMessage caller 投递密文留言
+// POST /api/v1/mailbox/:target_id/messages
 func (h *MailboxHandler) DepositMessage(c *gin.Context) {
 	if !h.allowMailboxIP(c) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
 		return
 	}
-	agentID := c.Param("agent_id")
+	targetID := c.Param("target_id")
+	if targetID == "" {
+		targetID = c.Param("agent_id") // 兼容旧路由参数名
+	}
 	var req depositMessageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -74,10 +82,14 @@ func (h *MailboxHandler) DepositMessage(c *gin.Context) {
 	}
 
 	msg, err := h.mailboxSvc.DepositInbound(services.DepositInboundParams{
-		AgentID:    agentID,
+		TargetType: parseTargetType(req.TargetType),
+		TargetID:   targetID,
 		CallerFP:   req.CallerFP,
 		MessageID:  req.MessageID,
+		RequestID:  req.RequestID,
 		SessionID:  req.SessionID,
+		GroupID:    req.GroupID,
+		Kind:       parseMailboxKind(req.Kind),
 		Ciphertext: req.Ciphertext,
 	})
 	if err != nil {
@@ -85,21 +97,50 @@ func (h *MailboxHandler) DepositMessage(c *gin.Context) {
 		return
 	}
 
-	// 通知在线 agent 有新信（best-effort）
-	h.notifyMailWaiting(agentID)
+	h.notifyMailWaiting(targetID, msg.TargetType)
 
-	pending, _ := h.mailboxSvc.PendingCount(agentID)
+	pending, _ := h.mailboxSvc.PendingCount(targetID)
 	c.JSON(http.StatusCreated, gin.H{
-		"id":         msg.ID,
-		"message_id": msg.MessageID,
-		"pending":    pending,
-		"expires_at": msg.ExpiresAt.Format(time.RFC3339),
+		"id":          msg.ID,
+		"message_id":  msg.MessageID,
+		"request_id":  msg.RequestID,
+		"session_id":  msg.SessionID,
+		"group_id":    msg.GroupID,
+		"target_type": msg.TargetType,
+		"target_id":   msg.TargetID,
+		"kind":        msg.Kind,
+		"pending":     pending,
+		"expires_at":  msg.ExpiresAt.Format(time.RFC3339),
 	})
 }
 
-// ListReplies caller 拉取回复
-// GET /api/v1/mailbox/:agent_id/replies?caller_fp=&after=
+// ListReplies caller 拉取指定 target 的回复
+// GET /api/v1/mailbox/:target_id/replies?caller_fp=&after=
 func (h *MailboxHandler) ListReplies(c *gin.Context) {
+	if !h.allowMailboxIP(c) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+		return
+	}
+	targetID := h.pathTargetID(c)
+	callerFP := c.Query("caller_fp")
+	if callerFP == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "caller_fp is required"})
+		return
+	}
+	after := parseAfterQuery(c)
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+
+	rows, err := h.mailboxSvc.ListReplies(targetID, callerFP, after, limit)
+	if err != nil {
+		h.writeMailboxErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"replies": serializeReplies(rows), "total": len(rows)})
+}
+
+// ListInboxReplies caller 跨 target 统一拉取待收回复（app 上线时收取）
+// GET /api/v1/inbox/replies?caller_fp=&after=
+func (h *MailboxHandler) ListInboxReplies(c *gin.Context) {
 	if !h.allowMailboxIP(c) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
 		return
@@ -109,41 +150,23 @@ func (h *MailboxHandler) ListReplies(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "caller_fp is required"})
 		return
 	}
-	var after time.Time
-	if s := c.Query("after"); s != "" {
-		if t, err := time.Parse(time.RFC3339, s); err == nil {
-			after = t
-		}
-	}
+	after := parseAfterQuery(c)
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 
-	rows, err := h.mailboxSvc.ListReplies(c.Param("agent_id"), callerFP, after, limit)
+	rows, err := h.mailboxSvc.ListAllRepliesForCaller(callerFP, after, limit)
 	if err != nil {
 		h.writeMailboxErr(c, err)
 		return
 	}
-
-	out := make([]gin.H, 0, len(rows))
-	for _, m := range rows {
-		out = append(out, gin.H{
-			"id":         m.ID,
-			"message_id": m.MessageID,
-			"reply_to":   m.ReplyTo,
-			"session_id": m.SessionID,
-			"ciphertext": m.Ciphertext,
-			"created_at": m.CreatedAt.Format(time.RFC3339),
-		})
-	}
-	c.JSON(http.StatusOK, gin.H{"replies": out, "total": len(out)})
+	c.JSON(http.StatusOK, gin.H{"replies": serializeReplies(rows), "total": len(rows)})
 }
 
 type ackRepliesRequest struct {
 	CallerFP string   `json:"caller_fp" binding:"required"`
-	IDs      []string `json:"ids"       binding:"required,min=1"`
+	IDs      []string `json:"ids" binding:"required,min=1"`
 }
 
-// AckReplies caller 确认已落本地
-// POST /api/v1/mailbox/:agent_id/replies/ack
+// AckReplies caller 确认已落本地（单 target）
 func (h *MailboxHandler) AckReplies(c *gin.Context) {
 	if !h.allowMailboxIP(c) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
@@ -154,7 +177,7 @@ func (h *MailboxHandler) AckReplies(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	n, err := h.mailboxSvc.AckReplies(c.Param("agent_id"), req.CallerFP, req.IDs)
+	n, err := h.mailboxSvc.AckReplies(h.pathTargetID(c), req.CallerFP, req.IDs)
 	if err != nil {
 		h.writeMailboxErr(c, err)
 		return
@@ -162,23 +185,40 @@ func (h *MailboxHandler) AckReplies(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"acked": n})
 }
 
-// ── Agent APIs（HMAC） ───────────────────────────────────────────────────────
+// AckInboxReplies caller 跨 target 确认回复
+// POST /api/v1/inbox/replies/ack
+func (h *MailboxHandler) AckInboxReplies(c *gin.Context) {
+	if !h.allowMailboxIP(c) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+		return
+	}
+	var req ackRepliesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	n, err := h.mailboxSvc.AckRepliesGlobal(req.CallerFP, req.IDs)
+	if err != nil {
+		h.writeMailboxErr(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"acked": n})
+}
 
 type agentAuthFields struct {
 	Timestamp string `json:"timestamp" binding:"required"`
-	Nonce     string `json:"nonce"     binding:"required"`
+	Nonce     string `json:"nonce" binding:"required"`
 	Signature string `json:"signature" binding:"required"`
 }
 
-// ClaimPending agent 拉取待处理留言
-// GET /api/v1/mailbox/:agent_id/pending?limit=&timestamp=&nonce=&signature=
+// ClaimPending agent/group handler 拉取待处理留言
 func (h *MailboxHandler) ClaimPending(c *gin.Context) {
-	agentID := c.Param("agent_id")
-	if !h.verifyAgentHMAC(c, agentID, c.Query("timestamp"), c.Query("nonce"), c.Query("signature")) {
+	targetID := h.pathTargetID(c)
+	if !h.verifyAgentHMAC(c, targetID, c.Query("timestamp"), c.Query("nonce"), c.Query("signature")) {
 		return
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "5"))
-	rows, err := h.mailboxSvc.ClaimPending(agentID, limit)
+	rows, err := h.mailboxSvc.ClaimPending(targetID, limit)
 	if err != nil {
 		h.writeMailboxErr(c, err)
 		return
@@ -186,12 +226,17 @@ func (h *MailboxHandler) ClaimPending(c *gin.Context) {
 	out := make([]gin.H, 0, len(rows))
 	for _, m := range rows {
 		out = append(out, gin.H{
-			"id":         m.ID,
-			"message_id": m.MessageID,
-			"session_id": m.SessionID,
-			"caller_fp":  m.CallerFP,
-			"ciphertext": m.Ciphertext,
-			"created_at": m.CreatedAt.Format(time.RFC3339),
+			"id":          m.ID,
+			"message_id":  m.MessageID,
+			"request_id":  m.RequestID,
+			"session_id":  m.SessionID,
+			"group_id":    m.GroupID,
+			"target_type": m.TargetType,
+			"target_id":   m.TargetID,
+			"kind":        m.Kind,
+			"caller_fp":   m.CallerFP,
+			"ciphertext":  m.Ciphertext,
+			"created_at":  m.CreatedAt.Format(time.RFC3339),
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"messages": out, "total": len(out)})
@@ -202,19 +247,18 @@ type ackInboundRequest struct {
 	IDs []string `json:"ids" binding:"required,min=1"`
 }
 
-// AckInbound agent 确认处理完留言
-// POST /api/v1/mailbox/:agent_id/ack
+// AckInbound agent/group handler 确认处理完留言
 func (h *MailboxHandler) AckInbound(c *gin.Context) {
-	agentID := c.Param("agent_id")
+	targetID := h.pathTargetID(c)
 	var req ackInboundRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if !h.verifyAgentHMAC(c, agentID, req.Timestamp, req.Nonce, req.Signature) {
+	if !h.verifyAgentHMAC(c, targetID, req.Timestamp, req.Nonce, req.Signature) {
 		return
 	}
-	n, err := h.mailboxSvc.AckInbound(agentID, req.IDs)
+	n, err := h.mailboxSvc.AckInbound(targetID, req.IDs)
 	if err != nil {
 		h.writeMailboxErr(c, err)
 		return
@@ -224,31 +268,36 @@ func (h *MailboxHandler) AckInbound(c *gin.Context) {
 
 type depositReplyRequest struct {
 	agentAuthFields
-	CallerFP   string `json:"caller_fp"  binding:"required"`
+	CallerFP   string `json:"caller_fp" binding:"required"`
 	MessageID  string `json:"message_id"`
-	ReplyTo    string `json:"reply_to"   binding:"required"`
+	ReplyTo    string `json:"reply_to" binding:"required"`
+	RequestID  string `json:"request_id"`
 	SessionID  string `json:"session_id"`
+	GroupID    string `json:"group_id"`
+	Kind       string `json:"kind"`
 	Ciphertext string `json:"ciphertext" binding:"required"`
 }
 
-// DepositReply agent 回投回复密文
-// POST /api/v1/mailbox/:agent_id/replies
+// DepositReply agent/group handler 回投回复密文
 func (h *MailboxHandler) DepositReply(c *gin.Context) {
-	agentID := c.Param("agent_id")
+	targetID := h.pathTargetID(c)
 	var req depositReplyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if !h.verifyAgentHMAC(c, agentID, req.Timestamp, req.Nonce, req.Signature) {
+	if !h.verifyAgentHMAC(c, targetID, req.Timestamp, req.Nonce, req.Signature) {
 		return
 	}
 	msg, err := h.mailboxSvc.DepositReply(services.DepositReplyParams{
-		AgentID:    agentID,
+		TargetID:   targetID,
 		CallerFP:   req.CallerFP,
 		MessageID:  req.MessageID,
 		ReplyTo:    req.ReplyTo,
+		RequestID:  req.RequestID,
 		SessionID:  req.SessionID,
+		GroupID:    req.GroupID,
+		Kind:       parseMailboxKind(req.Kind),
 		Ciphertext: req.Ciphertext,
 	})
 	if err != nil {
@@ -256,15 +305,77 @@ func (h *MailboxHandler) DepositReply(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{
-		"id":         msg.ID,
-		"message_id": msg.MessageID,
-		"reply_to":   msg.ReplyTo,
+		"id":          msg.ID,
+		"message_id":  msg.MessageID,
+		"request_id":  msg.RequestID,
+		"reply_to":    msg.ReplyTo,
+		"session_id":  msg.SessionID,
+		"group_id":    msg.GroupID,
+		"target_type": msg.TargetType,
+		"target_id":   msg.TargetID,
+		"kind":        msg.Kind,
 	})
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────────
+func (h *MailboxHandler) pathTargetID(c *gin.Context) string {
+	if id := c.Param("target_id"); id != "" {
+		return id
+	}
+	return c.Param("agent_id")
+}
 
-func (h *MailboxHandler) verifyAgentHMAC(c *gin.Context, agentID, timestamp, nonce, signature string) bool {
+func parseAfterQuery(c *gin.Context) time.Time {
+	var after time.Time
+	if s := c.Query("after"); s != "" {
+		if t, err := time.Parse(time.RFC3339, s); err == nil {
+			after = t
+		}
+	}
+	return after
+}
+
+func parseTargetType(s string) models.MailboxTargetType {
+	switch s {
+	case "group":
+		return models.MailboxTargetGroup
+	default:
+		return models.MailboxTargetAgent
+	}
+}
+
+func parseMailboxKind(s string) models.MailboxKind {
+	switch s {
+	case "stream":
+		return models.MailboxKindStream
+	case "article":
+		return models.MailboxKindArticle
+	default:
+		return models.MailboxKindChat
+	}
+}
+
+func serializeReplies(rows []models.MailboxMessage) []gin.H {
+	out := make([]gin.H, 0, len(rows))
+	for _, m := range rows {
+		out = append(out, gin.H{
+			"id":          m.ID,
+			"message_id":  m.MessageID,
+			"request_id":  m.RequestID,
+			"reply_to":    m.ReplyTo,
+			"session_id":  m.SessionID,
+			"group_id":    m.GroupID,
+			"target_type": m.TargetType,
+			"target_id":   m.TargetID,
+			"agent_id":    m.TargetID, // 兼容旧客户端
+			"kind":        m.Kind,
+			"ciphertext":  m.Ciphertext,
+			"created_at":  m.CreatedAt.Format(time.RFC3339),
+		})
+	}
+	return out
+}
+
+func (h *MailboxHandler) verifyAgentHMAC(c *gin.Context, targetID, timestamp, nonce, signature string) bool {
 	if timestamp == "" || nonce == "" || signature == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "timestamp, nonce, signature required"})
 		return false
@@ -277,7 +388,7 @@ func (h *MailboxHandler) verifyAgentHMAC(c *gin.Context, agentID, timestamp, non
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "nonce already used"})
 		return false
 	}
-	agent, err := h.agentSvc.GetByID(agentID)
+	agent, err := h.agentSvc.GetByID(targetID)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "agent not found"})
 		return false
@@ -287,8 +398,7 @@ func (h *MailboxHandler) verifyAgentHMAC(c *gin.Context, agentID, timestamp, non
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "channel secret unavailable"})
 		return false
 	}
-	// signing_string = "{channel_id}\n{agent_id}\n{timestamp}\n{nonce}"（与注册一致）
-	signing := channel.ID + "\n" + agentID + "\n" + timestamp + "\n" + nonce
+	signing := channel.ID + "\n" + targetID + "\n" + timestamp + "\n" + nonce
 	if !services.VerifySignatureRaw(channel.Secret, signing, signature) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid signature"})
 		return false
@@ -296,17 +406,17 @@ func (h *MailboxHandler) verifyAgentHMAC(c *gin.Context, agentID, timestamp, non
 	return true
 }
 
-func (h *MailboxHandler) notifyMailWaiting(agentID string) {
-	if h.tunnelMgr == nil {
+func (h *MailboxHandler) notifyMailWaiting(targetID string, targetType models.MailboxTargetType) {
+	if h.tunnelMgr == nil || targetType != models.MailboxTargetAgent {
 		return
 	}
-	agent, err := h.agentSvc.GetByID(agentID)
+	agent, err := h.agentSvc.GetByID(targetID)
 	if err != nil {
 		return
 	}
 	h.tunnelMgr.BroadcastControl(agent.ChannelID, &services.TunnelMessage{
 		Type:    services.TunnelMsgMailWaiting,
-		AgentID: agentID,
+		AgentID: targetID,
 	})
 }
 
@@ -332,8 +442,10 @@ func (h *MailboxHandler) allowMailboxIP(c *gin.Context) bool {
 
 func (h *MailboxHandler) writeMailboxErr(c *gin.Context, err error) {
 	switch err {
-	case services.ErrMailboxAgentNotFound:
-		c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
+	case services.ErrMailboxTargetNotFound, services.ErrMailboxAgentNotFound:
+		c.JSON(http.StatusNotFound, gin.H{"error": "mailbox target not found"})
+	case services.ErrMailboxInvalidTarget:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid mailbox target"})
 	case services.ErrMailboxFull:
 		c.JSON(http.StatusInsufficientStorage, gin.H{"error": "mailbox full"})
 	case services.ErrMailboxTooLarge:

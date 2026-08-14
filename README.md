@@ -1,23 +1,27 @@
 # Channel Service
 
-用 Go 实现的通道代理服务，打通任意两个本地应用。
+shepaw 与 agent-bridge 之间的 **云端收件箱** + **NAT 隧道传输层**。
 
-## 核心功能
+## 核心定位
 
-| 功能 | 说明 |
-|------|------|
-| 协议支持 | HTTP / HTTPS / WebSocket / TCP / UDP |
-| 用户系统 | 微信扫码登录（中国）/ Google OAuth（海外） |
-| Token 管理 | 临时 access token，默认 15 分钟，可自定义 |
-| Channel 管理 | 每用户最多 5 个（可配置），永久地址 |
-| 限流控制 | 每 channel 独立配置带宽 / 并发连接 / 请求速率 |
+| 层级 | 能力 | 说明 |
+|------|------|------|
+| **收件箱（主）** | 异步密文信箱 | App/agent 离线仍可留言与收取；E2E seal-box，服务端只见密文 |
+| **传输层（辅）** | HTTP/WS tunnel | 让 agent-bridge 在 NAT 后保持实时可达 |
+| **发现/接入** | Agent 目录 + 接入审批 | 公开 agent 名片、Noise 白名单中介 |
+
+架构详情见 [docs/INBOX_ARCHITECTURE.md](docs/INBOX_ARCHITECTURE.md)。
+
+## 收件箱串联键
+
+每条消息记录 `target_id`（agent 或 group）、`session_id`、`request_id`、`message_id`/`reply_to`，保证异步回复能串回正确的会话与 inflight turn。
 
 ## 快速开始
 
-### 本地运行（无需 Redis / Postgres）
+### 本地运行
 
 ```bash
-cd /projects/channel
+cd channel
 go build -o channel-service ./pkg/cmd/
 ./channel-service
 ```
@@ -27,79 +31,64 @@ go build -o channel-service ./pkg/cmd/
 ### Docker Compose
 
 ```bash
-cp .env.example .env   # 填入 OAuth 配置
+cp .env.example .env
 docker-compose up -d
 ```
 
-生产部署（TLS、鉴权、Redis）见 [docs/DOCKER_PRODUCTION.md](docs/DOCKER_PRODUCTION.md)。
+## 收件箱 API（节选）
 
-## 工作流程
-
-1. **用户登录** → 微信扫码 或 Google OAuth
-2. **获取 token** → `POST /api/v1/tokens` (有效期默认 15 分钟)
-3. **注册 channel**：
+### Caller（shepaw，免登录）
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/channels \
-  -H "Authorization: Bearer <your-token>" \
+# 留言（agent 忙或离线）
+curl -X POST http://localhost:8080/api/v1/mailbox/acp_agent_xxx/messages \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "my-app",
-    "type": "http",
-    "target": "http://127.0.0.1:3000"
+    "caller_fp": "0123456789abcdef",
+    "message_id": "msg-uuid",
+    "request_id": "req-uuid",
+    "session_id": "sess-uuid",
+    "group_id": "psess_group_abc",
+    "ciphertext": "<base64-sealed>"
   }'
+
+# App 上线：跨 agent 统一收取
+curl "http://localhost:8080/api/v1/inbox/replies?caller_fp=0123456789abcdef"
 ```
 
-返回：
-```json
-{
-  "id": "xxxx-xxxx",
-  "endpoint": "http://localhost:8080/proxy/xxxx-xxxx",
-  "type": "http",
-  ...
-}
+### Agent（agent-bridge，HMAC）
+
+```bash
+# claim 待处理留言 → 处理后 POST /replies 回投密文
+curl "http://localhost:8080/api/v1/mailbox/acp_agent_xxx/pending?limit=5&timestamp=...&nonce=...&signature=..."
 ```
 
-4. **其他应用访问** → `GET http://localhost:8080/proxy/xxxx-xxxx/path`
+## 其他能力
 
-## API 参考
+| 功能 | 说明 |
+|------|------|
+| 用户系统 | 微信 / Google / 邮箱登录 |
+| Tunnel | `/tunnel/connect` WebSocket 长连接 |
+| 代理转发 | `/proxy/:channel_id/*`（传输层，非身份） |
+| Agent 发现 | `/api/v1/discovery/agents` |
+| 版本管理 | `/api/v1/check-update` |
 
-### 认证
+完整 API 与配置见各 `docs/` 文档。
 
-| Method | Path | 说明 |
-|--------|------|------|
-| GET | /api/v1/auth/wechat/qrcode | 获取微信扫码 URL |
-| GET | /api/v1/auth/wechat/status?scene_id=xxx | 轮询扫码状态 |
-| GET | /api/v1/auth/google/initiate | 跳转 Google 登录 |
-| POST | /api/v1/tokens | 生成 access token |
-| DELETE | /api/v1/tokens/current | 吊销当前 token |
+## 项目结构
 
-### Channel
-
-| Method | Path | 说明 |
-|--------|------|------|
-| POST | /api/v1/channels | 创建 channel |
-| GET | /api/v1/channels | 列出我的 channels |
-| GET | /api/v1/channels/:id | 获取单个 |
-| PUT | /api/v1/channels/:id | 更新 |
-| DELETE | /api/v1/channels/:id | 删除（地址失效） |
-| POST | /api/v1/channels/:id/rate-limits | 添加限流规则 |
-| GET | /api/v1/channels/:id/rate-limits | 查看限流规则 |
-| DELETE | /api/v1/channels/:id/rate-limits/:rule_id | 删除限流规则 |
-
-### 限流规则示例
-
-```json
-{
-  "rule_type": "bandwidth",
-  "limit_value": 10.0,
-  "time_window": "1s"
-}
 ```
-
-- `rule_type`: `bandwidth`（Mbps）/ `connections`（并发数）/ `requests`（rps）
-- `limit_value`: 数值限制
-- `time_window`: Go Duration，如 `1s` `1m` `1h`
+channel/
+├── pkg/
+│   ├── cmd/main.go
+│   └── internal/
+│       ├── models/          # User, Agent, MailboxMessage, Channel, …
+│       ├── services/        # mailbox, agent, tunnel, channel, …
+│       └── handlers/
+├── docs/
+│   └── INBOX_ARCHITECTURE.md
+└── templates/
+```
 
 ## 配置（环境变量）
 
@@ -107,49 +96,8 @@ curl -X POST http://localhost:8080/api/v1/channels \
 |------|--------|------|
 | PORT | 8080 | HTTP 监听端口 |
 | BASE_URL | http://localhost:8080 | 公开访问地址 |
-| BASE_DOMAIN | localhost:8080 | 域名（用于生成 endpoint） |
-| DATABASE_URL | sqlite:./channel.db | 数据库；支持 sqlite: 或 postgres:// |
-| REDIS_ADDR | localhost:6379 | Redis 地址（不可用时自动降级内存模式） |
-| TOKEN_TTL | 15m | 默认 token 有效期 |
-| MAX_CHANNELS | 5 | 每用户最大 channel 数 |
-| TCP_PORT_RANGE_START | 10000 | TCP/UDP 端口段起始 |
-| TCP_PORT_RANGE_END | 20000 | TCP/UDP 端口段结束 |
-| WECHAT_APP_ID | - | 微信开放平台 AppID |
-| WECHAT_APP_SECRET | - | 微信开放平台 AppSecret |
-| GOOGLE_CLIENT_ID | - | Google OAuth Client ID |
-| GOOGLE_CLIENT_SECRET | - | Google OAuth Client Secret |
+| DATABASE_URL | sqlite:./channel.db | SQLite 或 postgres:// |
+| REDIS_ADDR | localhost:6379 | 可选，降级内存模式 |
+| MAX_CHANNELS | 5 | 每用户最大 tunnel 数 |
 
-## 协议说明
-
-- **HTTP/HTTPS/WebSocket**：通过 `/proxy/:channel_id/*path` 路由转发
-- **TCP/UDP**：服务启动独立端口监听（端口在 endpoint 中返回），注册时立即开始监听
-
-## 项目结构
-
-```
-/projects/channel/
-├── pkg/
-│   ├── cmd/main.go                        # 入口
-│   └── internal/
-│       ├── models/                        # 数据模型
-│       ├── services/                      # 业务逻辑
-│       │   ├── auth.go
-│       │   ├── channel.go
-│       │   ├── port_allocator.go          # TCP/UDP 端口分配
-│       │   ├── rate_limit.go
-│       │   ├── redis.go                   # Redis + Nop 降级
-│       │   ├── database.go                # SQLite / Postgres
-│       │   └── proxy/
-│       │       ├── http.go                # HTTP 反向代理
-│       │       └── websocket.go           # WebSocket 代理
-│       └── handlers/
-│           ├── auth.go
-│           ├── channel.go
-│           ├── proxy.go                   # TCP/UDP/HTTP/WS 分发
-│           ├── oauth.go                   # 微信 + Google OAuth
-│           └── middleware.go              # token 认证中间件
-├── templates/                             # 前端页面（login/dashboard）
-├── Dockerfile
-├── docker-compose.yml
-└── .env.example
-```
+完整列表见 `.env.example`。

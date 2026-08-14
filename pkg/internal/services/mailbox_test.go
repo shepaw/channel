@@ -40,14 +40,16 @@ func setupMailboxTestDB(t *testing.T) *MailboxService {
 
 func TestMailboxDepositClaimReplyAck(t *testing.T) {
 	svc := setupMailboxTestDB(t)
-	agentID := "acp_agent_aabbccdd"
+	targetID := "acp_agent_aabbccdd"
 	callerFP := "fedcba9876543210"
 
 	msg, err := svc.DepositInbound(DepositInboundParams{
-		AgentID:    agentID,
+		TargetID:   targetID,
 		CallerFP:   callerFP,
 		MessageID:  "msg-1",
+		RequestID:  "req-1",
 		SessionID:  "sess-1",
+		GroupID:    "psess_group_abc",
 		Ciphertext: "dGVzdA==",
 	})
 	if err != nil {
@@ -56,10 +58,12 @@ func TestMailboxDepositClaimReplyAck(t *testing.T) {
 	if msg.Status != models.MailboxStatusPending {
 		t.Fatalf("expected pending, got %s", msg.Status)
 	}
+	if msg.RequestID != "req-1" || msg.GroupID != "psess_group_abc" {
+		t.Fatalf("metadata not persisted")
+	}
 
-	// idempotent
 	again, err := svc.DepositInbound(DepositInboundParams{
-		AgentID:    agentID,
+		TargetID:   targetID,
 		CallerFP:   callerFP,
 		MessageID:  "msg-1",
 		SessionID:  "sess-1",
@@ -72,7 +76,7 @@ func TestMailboxDepositClaimReplyAck(t *testing.T) {
 		t.Fatalf("idempotent should return same id")
 	}
 
-	pending, err := svc.PendingCount(agentID)
+	pending, err := svc.PendingCount(targetID)
 	if err != nil {
 		t.Fatalf("pending count: %v", err)
 	}
@@ -80,7 +84,7 @@ func TestMailboxDepositClaimReplyAck(t *testing.T) {
 		t.Fatalf("pending want 1 got %d", pending)
 	}
 
-	claimed, err := svc.ClaimPending(agentID, 5)
+	claimed, err := svc.ClaimPending(targetID, 5)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -92,21 +96,23 @@ func TestMailboxDepositClaimReplyAck(t *testing.T) {
 	}
 
 	if _, err := svc.DepositReply(DepositReplyParams{
-		AgentID:    agentID,
+		TargetID:   targetID,
 		CallerFP:   callerFP,
 		ReplyTo:    "msg-1",
+		RequestID:  "req-1",
 		SessionID:  "sess-1",
+		GroupID:    "psess_group_abc",
 		MessageID:  "reply-1",
 		Ciphertext: "cmVwbHk=",
 	}); err != nil {
 		t.Fatalf("deposit reply: %v", err)
 	}
 
-	if _, err := svc.AckInbound(agentID, []string{claimed[0].ID}); err != nil {
+	if _, err := svc.AckInbound(targetID, []string{claimed[0].ID}); err != nil {
 		t.Fatalf("ack inbound: %v", err)
 	}
 
-	replies, err := svc.ListReplies(agentID, callerFP, time.Time{}, 50)
+	replies, err := svc.ListReplies(targetID, callerFP, time.Time{}, 50)
 	if err != nil {
 		t.Fatalf("list replies: %v", err)
 	}
@@ -114,10 +120,18 @@ func TestMailboxDepositClaimReplyAck(t *testing.T) {
 		t.Fatalf("replies want 1 got %d", len(replies))
 	}
 
-	if _, err := svc.AckReplies(agentID, callerFP, []string{replies[0].ID}); err != nil {
+	all, err := svc.ListAllRepliesForCaller(callerFP, time.Time{}, 50)
+	if err != nil {
+		t.Fatalf("list all replies: %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("all replies want 1 got %d", len(all))
+	}
+
+	if _, err := svc.AckReplies(targetID, callerFP, []string{replies[0].ID}); err != nil {
 		t.Fatalf("ack replies: %v", err)
 	}
-	replies2, err := svc.ListReplies(agentID, callerFP, time.Time{}, 50)
+	replies2, err := svc.ListReplies(targetID, callerFP, time.Time{}, 50)
 	if err != nil {
 		t.Fatalf("list after ack: %v", err)
 	}
@@ -126,10 +140,39 @@ func TestMailboxDepositClaimReplyAck(t *testing.T) {
 	}
 }
 
+func TestMailboxGroupTargetWithoutRegistration(t *testing.T) {
+	svc := setupMailboxTestDB(t)
+	groupID := "psess_group_xyz12345"
+	callerFP := "fedcba9876543210"
+
+	msg, err := svc.DepositInbound(DepositInboundParams{
+		TargetType: models.MailboxTargetGroup,
+		TargetID:   groupID,
+		CallerFP:   callerFP,
+		MessageID:  "msg-g1",
+		SessionID:  "sess-g1",
+		Ciphertext: "dGVzdA==",
+	})
+	if err != nil {
+		t.Fatalf("group deposit: %v", err)
+	}
+	if msg.TargetType != models.MailboxTargetGroup {
+		t.Fatalf("expected group target type")
+	}
+
+	n, err := svc.PendingCount(groupID)
+	if err != nil {
+		t.Fatalf("pending: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pending want 1 got %d", n)
+	}
+}
+
 func TestMailboxRejectsInvalidCallerFP(t *testing.T) {
 	svc := setupMailboxTestDB(t)
 	_, err := svc.DepositInbound(DepositInboundParams{
-		AgentID:    "acp_agent_aabbccdd",
+		TargetID:   "acp_agent_aabbccdd",
 		CallerFP:   "not-hex",
 		MessageID:  "m-bad",
 		Ciphertext: "dGVzdA==",

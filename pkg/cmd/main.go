@@ -58,6 +58,9 @@ func main() {
 	agentHandler := handlers.NewAgentHandler(agentSvc, channelSvcV2.ChannelService, redisSvc)
 	accessSvc := services.NewAccessService(dbSvc, agentSvc)
 	mailboxSvc := services.NewMailboxService(dbSvc)
+	if err := mailboxSvc.BackfillTargetColumns(); err != nil {
+		log.Printf("⚠️  Mailbox target backfill: %v", err)
+	}
 	mailboxHandler := handlers.NewMailboxHandler(mailboxSvc, agentSvc, channelSvcV2.ChannelService, tunnelMgr, redisSvc)
 	accessHandler := handlers.NewAccessHandler(accessSvc, agentSvc, channelSvcV2.ChannelService, tunnelMgr, redisSvc, cfg.BaseURL)
 	tunnelHandler := handlers.NewTunnelHandler(tunnelMgr, channelSvcV2.ChannelService, authSvc)
@@ -129,8 +132,9 @@ func main() {
 		api.POST("/access-requests", accessHandler.CreateRequest)
 		api.GET("/access-requests/mine", accessHandler.GetMine)
 
-		// 双向信箱（caller 免登录+IP 限流；agent 侧 HMAC）
-		mb := api.Group("/mailbox/:agent_id")
+		// 云端收件箱（caller 免登录+IP 限流；agent 侧 HMAC）
+		// 路径参数为 agent_id 或 group_id
+		mb := api.Group("/mailbox/:target_id")
 		{
 			mb.POST("/messages", mailboxHandler.DepositMessage)
 			mb.GET("/replies", mailboxHandler.ListReplies)
@@ -138,6 +142,13 @@ func main() {
 			mb.GET("/pending", mailboxHandler.ClaimPending)
 			mb.POST("/ack", mailboxHandler.AckInbound)
 			mb.POST("/replies", mailboxHandler.DepositReply)
+		}
+
+		// 用户侧统一收件箱（跨 agent/group 收取）
+		inbox := api.Group("/inbox")
+		{
+			inbox.GET("/replies", mailboxHandler.ListInboxReplies)
+			inbox.POST("/replies/ack", mailboxHandler.AckInboxReplies)
 		}
 
 		// agent 拉取已批准/撤销的授权（HMAC）

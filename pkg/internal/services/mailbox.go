@@ -2,6 +2,8 @@ package services
 
 import (
 	"errors"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/edenzou/channel-service/pkg/internal/models"
@@ -9,8 +11,8 @@ import (
 	"gorm.io/gorm"
 )
 
-// MailboxService channel 双向信箱：caller 留言、agent 拉取/回投、caller 收信。
-// 全程只处理密文；加解密在 agent / app 两端完成。
+// MailboxService 云端收件箱：caller 留言、agent/group 拉取/回投、caller 收信。
+// 全程只处理密文；加解密在 agent-bridge / shepaw 两端完成。
 type MailboxService struct {
 	db *DatabaseService
 }
@@ -20,38 +22,54 @@ func NewMailboxService(db *DatabaseService) *MailboxService {
 }
 
 var (
-	ErrMailboxAgentNotFound = errors.New("agent not found")
-	ErrMailboxFull          = errors.New("mailbox full")
-	ErrMailboxTooLarge      = errors.New("ciphertext too large")
-	ErrMailboxNotFound      = errors.New("mailbox message not found")
-	ErrMailboxInvalidFP     = errors.New("invalid caller_fp")
-	ErrMailboxEmptyBody     = errors.New("ciphertext required")
-	ErrMailboxDupReply      = errors.New("reply already exists for this message_id")
+	ErrMailboxTargetNotFound = errors.New("mailbox target not found")
+	ErrMailboxAgentNotFound  = ErrMailboxTargetNotFound // 兼容旧名
+	ErrMailboxFull           = errors.New("mailbox full")
+	ErrMailboxTooLarge       = errors.New("ciphertext too large")
+	ErrMailboxNotFound       = errors.New("mailbox message not found")
+	ErrMailboxInvalidFP      = errors.New("invalid caller_fp")
+	ErrMailboxEmptyBody      = errors.New("ciphertext required")
+	ErrMailboxDupReply       = errors.New("reply already exists for this message_id")
+	ErrMailboxInvalidTarget  = errors.New("invalid mailbox target")
 )
 
-// DepositInboundParams caller → agent 留言
+var mailboxTargetIDRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{2,63}$`)
+
+// DepositInboundParams caller → agent/group 留言
 type DepositInboundParams struct {
-	AgentID    string
+	TargetType models.MailboxTargetType
+	TargetID   string
 	CallerFP   string
 	MessageID  string
+	RequestID  string
 	SessionID  string
-	Ciphertext string // base64
+	GroupID    string
+	Kind       models.MailboxKind
+	Ciphertext string
 }
 
-// DepositInbound 投递留言。按 agent 配额限流；同 message_id 幂等（已存在则返回已有记录）。
+// DepositInbound 投递留言。按 target 配额限流；同 message_id 幂等。
 func (s *MailboxService) DepositInbound(p DepositInboundParams) (*models.MailboxMessage, error) {
-	if err := s.validateDeposit(p.AgentID, p.CallerFP, p.Ciphertext); err != nil {
+	resolvedType, targetID := normalizeTarget(p.TargetType, p.TargetID)
+	inferred, err := s.requireTarget(resolvedType, targetID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.validateDeposit(inferred, targetID, p.CallerFP, p.Ciphertext); err != nil {
 		return nil, err
 	}
 	if p.MessageID == "" {
 		p.MessageID = uuid.New().String()
 	}
+	kind := p.Kind
+	if kind == "" {
+		kind = models.MailboxKindChat
+	}
 
-	// 幂等：同 agent + message_id + inbound 已存在则直接返回
 	var existing models.MailboxMessage
-	err := s.db.DB.Where(
-		"agent_id = ? AND direction = ? AND message_id = ? AND deleted_at IS NULL",
-		p.AgentID, models.MailboxDirectionInbound, p.MessageID,
+	err = s.db.DB.Where(
+		"target_id = ? AND direction = ? AND message_id = ? AND deleted_at IS NULL",
+		targetID, models.MailboxDirectionInbound, p.MessageID,
 	).First(&existing).Error
 	if err == nil {
 		return &existing, nil
@@ -60,18 +78,23 @@ func (s *MailboxService) DepositInbound(p DepositInboundParams) (*models.Mailbox
 		return nil, err
 	}
 
-	if err := s.ensureQuota(p.AgentID); err != nil {
+	if err := s.ensureQuota(targetID); err != nil {
 		return nil, err
 	}
 
 	msg := &models.MailboxMessage{
 		ID:         uuid.New().String(),
-		AgentID:    p.AgentID,
+		TargetType: inferred,
+		TargetID:   targetID,
+		AgentID:    targetID,
 		Direction:  models.MailboxDirectionInbound,
 		Status:     models.MailboxStatusPending,
+		Kind:       kind,
 		CallerFP:   p.CallerFP,
 		MessageID:  p.MessageID,
+		RequestID:  p.RequestID,
 		SessionID:  p.SessionID,
+		GroupID:    p.GroupID,
 		Ciphertext: p.Ciphertext,
 		SizeBytes:  len(p.Ciphertext),
 		ExpiresAt:  time.Now().Add(models.MailboxTTL),
@@ -83,9 +106,8 @@ func (s *MailboxService) DepositInbound(p DepositInboundParams) (*models.Mailbox
 }
 
 // ClaimPending 原子领取最多 limit 条 pending inbound（含超时回收的 in_flight）。
-// 领取后标记 in_flight；agent 处理完须 Ack。
-func (s *MailboxService) ClaimPending(agentID string, limit int) ([]models.MailboxMessage, error) {
-	if _, err := s.requireAgent(agentID); err != nil {
+func (s *MailboxService) ClaimPending(targetID string, limit int) ([]models.MailboxMessage, error) {
+	if _, err := s.requireTarget("", targetID); err != nil {
 		return nil, err
 	}
 	if limit <= 0 {
@@ -95,17 +117,15 @@ func (s *MailboxService) ClaimPending(agentID string, limit int) ([]models.Mailb
 		limit = 20
 	}
 
-	s.recoverTimedOut(agentID)
+	s.recoverTimedOut(targetID)
 
 	var claimed []models.MailboxMessage
 	err := s.db.DB.Transaction(func(tx *gorm.DB) error {
 		var rows []models.MailboxMessage
-		// 不用 SELECT FOR UPDATE：SQLite 不支持；改为「查出后按 status=pending 条件更新」，
-		// 更新行数与查出不一致时说明被并发抢走，本事务只返回成功改到的行。
 		if err := tx.
 			Where(
-				"agent_id = ? AND direction = ? AND status = ? AND deleted_at IS NULL AND expires_at > ?",
-				agentID, models.MailboxDirectionInbound, models.MailboxStatusPending, time.Now(),
+				"target_id = ? AND direction = ? AND status = ? AND deleted_at IS NULL AND expires_at > ?",
+				targetID, models.MailboxDirectionInbound, models.MailboxStatusPending, time.Now(),
 			).
 			Order("created_at ASC").
 			Limit(limit).
@@ -133,40 +153,48 @@ func (s *MailboxService) ClaimPending(agentID string, limit int) ([]models.Mailb
 		if res.RowsAffected == 0 {
 			return nil
 		}
-		// 重新读出实际变成 in_flight 的行（本事务内）
 		return tx.Where("id IN ? AND status = ?", ids, models.MailboxStatusInFlight).Find(&claimed).Error
 	})
 	return claimed, err
 }
 
-// AckInbound agent 确认已处理（成功投递回复或丢弃）后删除 inbound。
-func (s *MailboxService) AckInbound(agentID string, ids []string) (int64, error) {
+// AckInbound agent/group 确认已处理 inbound。
+func (s *MailboxService) AckInbound(targetID string, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	if _, err := s.requireAgent(agentID); err != nil {
+	if _, err := s.requireTarget("", targetID); err != nil {
 		return 0, err
 	}
 	res := s.db.DB.Where(
-		"agent_id = ? AND direction = ? AND id IN ?",
-		agentID, models.MailboxDirectionInbound, ids,
+		"target_id = ? AND direction = ? AND id IN ?",
+		targetID, models.MailboxDirectionInbound, ids,
 	).Delete(&models.MailboxMessage{})
 	return res.RowsAffected, res.Error
 }
 
-// DepositReplyParams agent → caller 回复
+// DepositReplyParams agent/group → caller 回复
 type DepositReplyParams struct {
-	AgentID    string
+	TargetType models.MailboxTargetType
+	TargetID   string
 	CallerFP   string
-	MessageID  string // 回复自身的 id
-	ReplyTo    string // 原留言 message_id（幂等键）
+	MessageID  string
+	ReplyTo    string
+	RequestID  string
 	SessionID  string
+	GroupID    string
+	Kind       models.MailboxKind
 	Ciphertext string
 }
 
-// DepositReply 投递回复。同一 reply_to 幂等；写完不自动删 inbound（由 AckInbound 负责）。
+// DepositReply 投递回复。同一 reply_to 幂等。
 func (s *MailboxService) DepositReply(p DepositReplyParams) (*models.MailboxMessage, error) {
-	if err := s.validateDeposit(p.AgentID, p.CallerFP, p.Ciphertext); err != nil {
+	resolvedType, targetID := normalizeTarget(p.TargetType, p.TargetID)
+	inferred, err := s.requireTarget(resolvedType, targetID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.validateDeposit(inferred, targetID, p.CallerFP, p.Ciphertext); err != nil {
 		return nil, err
 	}
 	if p.ReplyTo == "" {
@@ -175,31 +203,40 @@ func (s *MailboxService) DepositReply(p DepositReplyParams) (*models.MailboxMess
 	if p.MessageID == "" {
 		p.MessageID = uuid.New().String()
 	}
+	kind := p.Kind
+	if kind == "" {
+		kind = models.MailboxKindChat
+	}
 
 	var existing models.MailboxMessage
-	err := s.db.DB.Where(
-		"agent_id = ? AND direction = ? AND reply_to = ? AND deleted_at IS NULL",
-		p.AgentID, models.MailboxDirectionReply, p.ReplyTo,
+	err = s.db.DB.Where(
+		"target_id = ? AND direction = ? AND message_id = ? AND deleted_at IS NULL",
+		targetID, models.MailboxDirectionReply, p.MessageID,
 	).First(&existing).Error
 	if err == nil {
-		return &existing, nil // 幂等
+		return &existing, nil
 	}
 	if err != gorm.ErrRecordNotFound {
 		return nil, err
 	}
 
-	if err := s.ensureQuota(p.AgentID); err != nil {
+	if err := s.ensureQuota(targetID); err != nil {
 		return nil, err
 	}
 
 	msg := &models.MailboxMessage{
 		ID:         uuid.New().String(),
-		AgentID:    p.AgentID,
+		TargetType: inferred,
+		TargetID:   targetID,
+		AgentID:    targetID,
 		Direction:  models.MailboxDirectionReply,
 		Status:     models.MailboxStatusPending,
+		Kind:       kind,
 		CallerFP:   p.CallerFP,
 		MessageID:  p.MessageID,
+		RequestID:  p.RequestID,
 		SessionID:  p.SessionID,
+		GroupID:    p.GroupID,
 		ReplyTo:    p.ReplyTo,
 		Ciphertext: p.Ciphertext,
 		SizeBytes:  len(p.Ciphertext),
@@ -211,63 +248,93 @@ func (s *MailboxService) DepositReply(p DepositReplyParams) (*models.MailboxMess
 	return msg, nil
 }
 
-// ListReplies 列出某 caller 在该 agent 下未收取的回复（pending）。
-func (s *MailboxService) ListReplies(agentID, callerFP string, after time.Time, limit int) ([]models.MailboxMessage, error) {
-	if _, err := s.requireAgent(agentID); err != nil {
+// ListReplies 列出某 caller 在指定 target 下未收取的回复。
+func (s *MailboxService) ListReplies(targetID, callerFP string, after time.Time, limit int) ([]models.MailboxMessage, error) {
+	if _, err := s.requireTarget("", targetID); err != nil {
 		return nil, err
 	}
+	return s.listRepliesQuery(
+		s.db.DB.Where(
+			"target_id = ? AND direction = ? AND status = ? AND caller_fp = ? AND deleted_at IS NULL AND expires_at > ?",
+			targetID, models.MailboxDirectionReply, models.MailboxStatusPending, callerFP, time.Now(),
+		),
+		after, limit,
+	)
+}
+
+// ListAllRepliesForCaller 跨 target 拉取 caller 的全部待收回复（app 上线时统一收取）。
+func (s *MailboxService) ListAllRepliesForCaller(callerFP string, after time.Time, limit int) ([]models.MailboxMessage, error) {
 	if !agentFPRegex.MatchString(callerFP) {
 		return nil, ErrMailboxInvalidFP
 	}
+	return s.listRepliesQuery(
+		s.db.DB.Where(
+			"direction = ? AND status = ? AND caller_fp = ? AND deleted_at IS NULL AND expires_at > ?",
+			models.MailboxDirectionReply, models.MailboxStatusPending, callerFP, time.Now(),
+		),
+		after, limit,
+	)
+}
+
+func (s *MailboxService) listRepliesQuery(q *gorm.DB, after time.Time, limit int) ([]models.MailboxMessage, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 	if limit > 100 {
 		limit = 100
 	}
-
-	q := s.db.DB.Where(
-		"agent_id = ? AND direction = ? AND status = ? AND caller_fp = ? AND deleted_at IS NULL AND expires_at > ?",
-		agentID, models.MailboxDirectionReply, models.MailboxStatusPending, callerFP, time.Now(),
-	)
 	if !after.IsZero() {
 		q = q.Where("created_at > ?", after)
 	}
-
 	var rows []models.MailboxMessage
 	err := q.Order("created_at ASC").Limit(limit).Find(&rows).Error
 	return rows, err
 }
 
-// AckReplies caller 确认已持久化到本地后删除回复。
-func (s *MailboxService) AckReplies(agentID, callerFP string, ids []string) (int64, error) {
+// AckReplies caller 确认已持久化回复。
+func (s *MailboxService) AckReplies(targetID, callerFP string, ids []string) (int64, error) {
 	if len(ids) == 0 {
 		return 0, nil
 	}
-	if _, err := s.requireAgent(agentID); err != nil {
+	if _, err := s.requireTarget("", targetID); err != nil {
 		return 0, err
 	}
 	res := s.db.DB.Where(
-		"agent_id = ? AND direction = ? AND caller_fp = ? AND id IN ?",
-		agentID, models.MailboxDirectionReply, callerFP, ids,
+		"target_id = ? AND direction = ? AND caller_fp = ? AND id IN ?",
+		targetID, models.MailboxDirectionReply, callerFP, ids,
 	).Delete(&models.MailboxMessage{})
 	return res.RowsAffected, res.Error
 }
 
-// PendingCount 当前可领取的 inbound 数量（含可回收的超时 in_flight）
-func (s *MailboxService) PendingCount(agentID string) (int64, error) {
-	s.recoverTimedOut(agentID)
+// AckRepliesGlobal 跨 target 确认回复（配合 ListAllRepliesForCaller）。
+func (s *MailboxService) AckRepliesGlobal(callerFP string, ids []string) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	if !agentFPRegex.MatchString(callerFP) {
+		return 0, ErrMailboxInvalidFP
+	}
+	res := s.db.DB.Where(
+		"direction = ? AND caller_fp = ? AND id IN ?",
+		models.MailboxDirectionReply, callerFP, ids,
+	).Delete(&models.MailboxMessage{})
+	return res.RowsAffected, res.Error
+}
+
+// PendingCount 当前可领取的 inbound 数量。
+func (s *MailboxService) PendingCount(targetID string) (int64, error) {
+	s.recoverTimedOut(targetID)
 	var n int64
 	err := s.db.DB.Model(&models.MailboxMessage{}).
 		Where(
-			"agent_id = ? AND direction = ? AND status = ? AND deleted_at IS NULL AND expires_at > ?",
-			agentID, models.MailboxDirectionInbound, models.MailboxStatusPending, time.Now(),
+			"target_id = ? AND direction = ? AND status = ? AND deleted_at IS NULL AND expires_at > ?",
+			targetID, models.MailboxDirectionInbound, models.MailboxStatusPending, time.Now(),
 		).Count(&n).Error
 	return n, err
 }
 
-func (s *MailboxService) validateDeposit(agentID, callerFP, ciphertext string) error {
-	if _, err := s.requireAgent(agentID); err != nil {
+func (s *MailboxService) validateDeposit(targetType models.MailboxTargetType, targetID, callerFP, ciphertext string) error {
+	if _, err := s.requireTarget(targetType, targetID); err != nil {
 		return err
 	}
 	if !agentFPRegex.MatchString(callerFP) {
@@ -282,41 +349,91 @@ func (s *MailboxService) validateDeposit(agentID, callerFP, ciphertext string) e
 	return nil
 }
 
-func (s *MailboxService) requireAgent(agentID string) (*models.Agent, error) {
-	var agent models.Agent
-	if err := s.db.DB.Where("agent_id = ? AND deleted_at IS NULL", agentID).First(&agent).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, ErrMailboxAgentNotFound
-		}
-		return nil, err
+func normalizeTarget(targetType models.MailboxTargetType, targetID string) (models.MailboxTargetType, string) {
+	if targetType == "" {
+		targetType = models.MailboxTargetAgent
 	}
-	return &agent, nil
+	return targetType, targetID
 }
 
-func (s *MailboxService) ensureQuota(agentID string) error {
+func (s *MailboxService) requireTarget(targetType models.MailboxTargetType, targetID string) (models.MailboxTargetType, error) {
+	if targetID == "" {
+		return "", ErrMailboxInvalidTarget
+	}
+	if !mailboxTargetIDRegex.MatchString(targetID) {
+		return "", ErrMailboxInvalidTarget
+	}
+
+	if targetType == "" {
+		var agent models.Agent
+		err := s.db.DB.Where("agent_id = ? AND deleted_at IS NULL", targetID).First(&agent).Error
+		if err == nil {
+			return models.MailboxTargetAgent, nil
+		}
+		if err != gorm.ErrRecordNotFound {
+			return "", err
+		}
+		if isGroupTargetID(targetID) {
+			return models.MailboxTargetGroup, nil
+		}
+		return "", ErrMailboxTargetNotFound
+	}
+
+	switch targetType {
+	case models.MailboxTargetAgent:
+		var agent models.Agent
+		if err := s.db.DB.Where("agent_id = ? AND deleted_at IS NULL", targetID).First(&agent).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				return "", ErrMailboxTargetNotFound
+			}
+			return "", err
+		}
+	case models.MailboxTargetGroup:
+		if !isGroupTargetID(targetID) {
+			return "", ErrMailboxInvalidTarget
+		}
+	default:
+		return "", ErrMailboxInvalidTarget
+	}
+	return targetType, nil
+}
+
+func isGroupTargetID(id string) bool {
+	return strings.HasPrefix(id, "psess_group_") || strings.HasPrefix(id, "group_")
+}
+
+func (s *MailboxService) ensureQuota(targetID string) error {
 	var n int64
 	if err := s.db.DB.Model(&models.MailboxMessage{}).
-		Where("agent_id = ? AND deleted_at IS NULL", agentID).
+		Where("target_id = ? AND deleted_at IS NULL", targetID).
 		Count(&n).Error; err != nil {
 		return err
 	}
-	if n >= int64(models.MailboxMaxPerAgent) {
+	if n >= int64(models.MailboxMaxPerTarget) {
 		return ErrMailboxFull
 	}
 	return nil
 }
 
-// recoverTimedOut 把超时的 in_flight 重新变为 pending（at-least-once）
-func (s *MailboxService) recoverTimedOut(agentID string) {
+func (s *MailboxService) recoverTimedOut(targetID string) {
 	cutoff := time.Now().Add(-models.MailboxVisibilityTimeout)
 	_ = s.db.DB.Model(&models.MailboxMessage{}).
 		Where(
-			"agent_id = ? AND direction = ? AND status = ? AND claimed_at < ? AND deleted_at IS NULL",
-			agentID, models.MailboxDirectionInbound, models.MailboxStatusInFlight, cutoff,
+			"target_id = ? AND direction = ? AND status = ? AND claimed_at < ? AND deleted_at IS NULL",
+			targetID, models.MailboxDirectionInbound, models.MailboxStatusInFlight, cutoff,
 		).
 		Updates(map[string]interface{}{
 			"status":     models.MailboxStatusPending,
 			"claimed_at": nil,
 			"updated_at": time.Now(),
 		}).Error
+}
+
+// BackfillTargetColumns 迁移旧数据：把 agent_id 复制到 target_id。
+func (s *MailboxService) BackfillTargetColumns() error {
+	return s.db.DB.Exec(`
+		UPDATE mailbox_messages
+		SET target_id = agent_id, target_type = 'agent'
+		WHERE (target_id = '' OR target_id IS NULL) AND agent_id != ''
+	`).Error
 }
