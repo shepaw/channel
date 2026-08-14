@@ -46,6 +46,7 @@ func main() {
 		log.Printf("⚠️  Failed to create upload dir: %v", err)
 	}
 	tunnelMgr := services.NewTunnelManager()
+	inboxSubs := services.NewInboxSubscriberManager()
 
 	// ── Handlers ──────────────────────────────────────────────────────────
 	authHandler := handlers.NewAuthHandler(authSvc, cfg)
@@ -61,7 +62,8 @@ func main() {
 	if err := mailboxSvc.BackfillTargetColumns(); err != nil {
 		log.Printf("⚠️  Mailbox target backfill: %v", err)
 	}
-	mailboxHandler := handlers.NewMailboxHandler(mailboxSvc, agentSvc, channelSvcV2.ChannelService, tunnelMgr, redisSvc)
+	mailboxHandler := handlers.NewMailboxHandler(mailboxSvc, agentSvc, channelSvcV2.ChannelService, tunnelMgr, inboxSubs, redisSvc)
+	inboxSubscribeHandler := handlers.NewInboxSubscribeHandler(inboxSubs, redisSvc)
 	accessHandler := handlers.NewAccessHandler(accessSvc, agentSvc, channelSvcV2.ChannelService, tunnelMgr, redisSvc, cfg.BaseURL)
 	tunnelHandler := handlers.NewTunnelHandler(tunnelMgr, channelSvcV2.ChannelService, authSvc)
 	tunnelHandler.SetAgentService(agentSvc) // 握手时连接即注册
@@ -183,6 +185,12 @@ func main() {
 			}
 		}
 	}
+
+	// 用户侧 inbox WebSocket 推送（caller_fp 订阅 mail_reply）
+	r.GET("/api/v1/inbox/subscribe", func(c *gin.Context) {
+		c.Abort()
+		inboxSubscribeHandler.Connect(c)
+	})
 
 	// 隧道路由
 	// ⚠️  /tunnel/connect 也是 WebSocket upgrade 请求，同样需要 c.Abort() 阻止 Gin

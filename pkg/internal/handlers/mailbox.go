@@ -20,6 +20,7 @@ import (
 //   POST   /api/v1/mailbox/:target_id/replies/ack
 //   GET    /api/v1/inbox/replies?caller_fp=          （跨 target 统一收取）
 //   POST   /api/v1/inbox/replies/ack
+//   GET    /api/v1/inbox/subscribe?caller_fp=        （WebSocket 推送 mail_reply）
 //
 // Agent/group handler（channel secret HMAC）：
 //   GET    /api/v1/mailbox/:target_id/pending
@@ -30,6 +31,7 @@ type MailboxHandler struct {
 	agentSvc   *services.AgentService
 	channelSvc *services.ChannelService
 	tunnelMgr  *services.TunnelManager
+	inboxSubs  *services.InboxSubscriberManager
 	redis      *services.RedisService
 	nonces     *services.NonceCache
 }
@@ -39,6 +41,7 @@ func NewMailboxHandler(
 	agentSvc *services.AgentService,
 	channelSvc *services.ChannelService,
 	tunnelMgr *services.TunnelManager,
+	inboxSubs *services.InboxSubscriberManager,
 	redis *services.RedisService,
 ) *MailboxHandler {
 	return &MailboxHandler{
@@ -46,6 +49,7 @@ func NewMailboxHandler(
 		agentSvc:   agentSvc,
 		channelSvc: channelSvc,
 		tunnelMgr:  tunnelMgr,
+		inboxSubs:  inboxSubs,
 		redis:      redis,
 		nonces:     services.NewNonceCache(),
 	}
@@ -304,6 +308,7 @@ func (h *MailboxHandler) DepositReply(c *gin.Context) {
 		h.writeMailboxErr(c, err)
 		return
 	}
+	h.notifyMailReply(msg)
 	c.JSON(http.StatusCreated, gin.H{
 		"id":          msg.ID,
 		"message_id":  msg.MessageID,
@@ -404,6 +409,21 @@ func (h *MailboxHandler) verifyAgentHMAC(c *gin.Context, targetID, timestamp, no
 		return false
 	}
 	return true
+}
+
+func (h *MailboxHandler) notifyMailReply(msg *models.MailboxMessage) {
+	if h.inboxSubs == nil || msg == nil {
+		return
+	}
+	h.inboxSubs.NotifyReply(msg.CallerFP, services.InboxReplyNotification{
+		Type:      "mail_reply",
+		ReplyID:   msg.ID,
+		TargetID:  msg.TargetID,
+		RequestID: msg.RequestID,
+		ReplyTo:   msg.ReplyTo,
+		MessageID: msg.MessageID,
+		Kind:      string(msg.Kind),
+	})
 }
 
 func (h *MailboxHandler) notifyMailWaiting(targetID string, targetType models.MailboxTargetType) {

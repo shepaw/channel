@@ -49,9 +49,9 @@ shepaw                          channel                         agent-bridge
 ### 收取回复（agent → inbox → caller）
 
 ```
-shepaw 上线
-  │  GET /mailbox/:target_id/replies?caller_fp=…     （单 agent/group）
-  │  或 GET /inbox/replies?caller_fp=…               （跨 target 统一收取）
+shepaw 进聊天页 / busy 留言后
+  │  WS /inbox/subscribe?caller_fp=…  （mail_reply 推送）
+  │  GET /inbox/replies?caller_fp=…     （拉密文，push 触发或 5s 兜底）
   ├──────────────────────────────►  pending replies
   │◄──────────────────────────────  [{ reply_to, request_id, session_id, ciphertext }]
   │  decrypt → 写入本地 DB → POST …/replies/ack
@@ -68,6 +68,7 @@ shepaw 上线
 | POST | `/api/v1/mailbox/:target_id/replies/ack` | 确认已落本地 |
 | GET | `/api/v1/inbox/replies` | **跨 target 统一拉取**（App 上线） |
 | POST | `/api/v1/inbox/replies/ack` | 跨 target 确认 |
+| GET | `/api/v1/inbox/subscribe` | **WebSocket**：`mail_reply` 推送（caller_fp） |
 
 ### Agent handler（channel secret HMAC）
 
@@ -108,5 +109,5 @@ HMAC 签名串：`{channel_id}\n{target_id}\n{timestamp}\n{nonce}`
 | 仓库 | 路径 |
 |------|------|
 | channel | `pkg/internal/models/mailbox.go`, `services/mailbox.go`, `handlers/mailbox.go` |
-| shepaw | `lib/services/mailbox/channel_mailbox_service.dart` |
+| shepaw | `lib/services/mailbox/channel_mailbox_service.dart`, `inbox_subscribe_service.dart`, `mailbox_inbox_poller.dart` |
 | agent-bridge | `sdks/shepaw-acp-sdk-typescript/src/mailbox.ts`, `server.ts` (drainMailbox) |
