@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/edenzou/channel-service/pkg/internal/models"
@@ -14,7 +15,7 @@ import (
 
 // AgentHandler agent 注册中心接口：
 //   - POST /api/v1/agents/register              agent 侧上报（HMAC 签名，无需用户 token）
-//   - GET  /api/v1/agents/:agent_id/presence    调用端在线探测（免登录 + IP 限流）
+//   - GET  /api/v1/agents/:agent_id/presence    已批准 caller 的在线探测（caller_fp + IP 限流）
 //   - GET  /api/v1/channels/:id/agents          owner 查看 channel 下的 agent 列表
 //   - PUT  /api/v1/agents/:agent_id             owner 更新名片 / 公开开关
 //   - DELETE /api/v1/agents/:agent_id           owner 注销 agent
@@ -23,15 +24,17 @@ import (
 type AgentHandler struct {
 	agentSvc   *services.AgentService
 	channelSvc *services.ChannelService
+	accessSvc  *services.AccessService
 	redis      *services.RedisService
 	tunnelMgr  *services.TunnelManager
 	nonces     *services.NonceCache
 }
 
-func NewAgentHandler(agentSvc *services.AgentService, channelSvc *services.ChannelService, redis *services.RedisService, tunnelMgr *services.TunnelManager) *AgentHandler {
+func NewAgentHandler(agentSvc *services.AgentService, channelSvc *services.ChannelService, accessSvc *services.AccessService, redis *services.RedisService, tunnelMgr *services.TunnelManager) *AgentHandler {
 	return &AgentHandler{
 		agentSvc:   agentSvc,
 		channelSvc: channelSvc,
+		accessSvc:  accessSvc,
 		redis:      redis,
 		tunnelMgr:  tunnelMgr,
 		nonces:     services.NewNonceCache(),
@@ -262,11 +265,11 @@ func (h *AgentHandler) Update(c *gin.Context) {
 	})
 }
 
-// Presence 调用端查询 agent 是否可通过 channel 到达。
-// GET /api/v1/agents/:agent_id/presence
+// Presence 已批准的调用端查询 agent 是否可通过 channel 到达。
+// GET /api/v1/agents/:agent_id/presence?caller_fp=
 //
-// 不返回 endpoint / 公钥等连接材料；只回答在线。心跳窗口内且所在
-// channel 隧道存活才为 true。未知 agent 与离线统一返回 online=false，避免枚举。
+// 必须带 caller_fp，且该指纹对该 agent 有 approved 授权；否则与「不存在」
+// 返回同一形状，避免靠猜 agent_id 枚举他人在线状态。不返回 endpoint。
 func (h *AgentHandler) Presence(c *gin.Context) {
 	if !h.allowDiscovery(c) {
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded, try again later"})
@@ -274,12 +277,31 @@ func (h *AgentHandler) Presence(c *gin.Context) {
 	}
 
 	agentID := c.Param("agent_id")
+	callerFP := strings.TrimSpace(c.Query("caller_fp"))
+	if callerFP == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "caller_fp required"})
+		return
+	}
+
+	denied := gin.H{"agent_id": agentID, "online": false}
+
+	grant, err := h.accessSvc.GetMine(agentID, callerFP)
+	if err != nil {
+		if err == services.ErrMailboxInvalidFP {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid caller_fp"})
+			return
+		}
+		c.JSON(http.StatusOK, denied)
+		return
+	}
+	if grant.Status != models.AccessApproved {
+		c.JSON(http.StatusOK, denied)
+		return
+	}
+
 	agent, err := h.agentSvc.GetByID(agentID)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{
-			"agent_id": agentID,
-			"online":   false,
-		})
+		c.JSON(http.StatusOK, denied)
 		return
 	}
 
@@ -287,6 +309,9 @@ func (h *AgentHandler) Presence(c *gin.Context) {
 		"agent_id":     agent.AgentID,
 		"online":       services.AgentReachable(agent, h.tunnelMgr),
 		"last_seen_at": agent.LastSeenAt.Format(time.RFC3339),
+		"capacity":     agent.Capacity,
+		"active_count": agent.ActiveCount,
+		"busy":         agent.Capacity > 0 && agent.ActiveCount >= agent.Capacity,
 	})
 }
 

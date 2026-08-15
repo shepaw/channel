@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/edenzou/channel-service/pkg/internal/models"
@@ -15,17 +16,19 @@ import (
 // MailboxHandler 云端收件箱 API（shepaw ↔ agent-bridge 异步信箱）。
 //
 // Caller（免登录，IP 限流）：
-//   POST   /api/v1/mailbox/:target_id/messages
-//   GET    /api/v1/mailbox/:target_id/replies?caller_fp=
-//   POST   /api/v1/mailbox/:target_id/replies/ack
-//   GET    /api/v1/inbox/replies?caller_fp=          （跨 target 统一收取）
-//   POST   /api/v1/inbox/replies/ack
-//   GET    /api/v1/inbox/subscribe?caller_fp=        （WebSocket 推送 mail_reply）
+//
+//	POST   /api/v1/mailbox/:target_id/messages
+//	GET    /api/v1/mailbox/:target_id/replies?caller_fp=
+//	POST   /api/v1/mailbox/:target_id/replies/ack
+//	GET    /api/v1/inbox/replies?caller_fp=          （跨 target 统一收取）
+//	POST   /api/v1/inbox/replies/ack
+//	GET    /api/v1/inbox/subscribe?caller_fp=        （WebSocket 推送 mail_reply）
 //
 // Agent/group handler（channel secret HMAC）：
-//   GET    /api/v1/mailbox/:target_id/pending
-//   POST   /api/v1/mailbox/:target_id/ack
-//   POST   /api/v1/mailbox/:target_id/replies
+//
+//	GET    /api/v1/mailbox/:target_id/pending
+//	POST   /api/v1/mailbox/:target_id/ack
+//	POST   /api/v1/mailbox/:target_id/replies
 type MailboxHandler struct {
 	mailboxSvc *services.MailboxService
 	agentSvc   *services.AgentService
@@ -101,7 +104,7 @@ func (h *MailboxHandler) DepositMessage(c *gin.Context) {
 		return
 	}
 
-	h.notifyMailWaiting(targetID, msg.TargetType)
+	h.notifyMailWaiting(msg)
 
 	pending, _ := h.mailboxSvc.PendingCount(targetID)
 	c.JSON(http.StatusCreated, gin.H{
@@ -222,7 +225,16 @@ func (h *MailboxHandler) ClaimPending(c *gin.Context) {
 		return
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "5"))
-	rows, err := h.mailboxSvc.ClaimPending(targetID, limit)
+	messageID := strings.TrimSpace(c.Query("message_id"))
+	var (
+		rows []models.MailboxMessage
+		err  error
+	)
+	if messageID != "" {
+		rows, err = h.mailboxSvc.ClaimPendingByMessageID(targetID, messageID)
+	} else {
+		rows, err = h.mailboxSvc.ClaimPending(targetID, limit)
+	}
 	if err != nil {
 		h.writeMailboxErr(c, err)
 		return
@@ -426,17 +438,22 @@ func (h *MailboxHandler) notifyMailReply(msg *models.MailboxMessage) {
 	})
 }
 
-func (h *MailboxHandler) notifyMailWaiting(targetID string, targetType models.MailboxTargetType) {
-	if h.tunnelMgr == nil || targetType != models.MailboxTargetAgent {
+func (h *MailboxHandler) notifyMailWaiting(msg *models.MailboxMessage) {
+	if h.tunnelMgr == nil || msg == nil || msg.TargetType != models.MailboxTargetAgent {
 		return
 	}
-	agent, err := h.agentSvc.GetByID(targetID)
+	agent, err := h.agentSvc.GetByID(msg.TargetID)
 	if err != nil {
 		return
 	}
 	h.tunnelMgr.BroadcastControl(agent.ChannelID, &services.TunnelMessage{
-		Type:    services.TunnelMsgMailWaiting,
-		AgentID: targetID,
+		Type:      services.TunnelMsgMailWaiting,
+		AgentID:   msg.TargetID,
+		MessageID: msg.MessageID,
+		RequestID: msg.RequestID,
+		SessionID: msg.SessionID,
+		CallerFP:  msg.CallerFP,
+		Kind:      string(msg.Kind),
 	})
 }
 

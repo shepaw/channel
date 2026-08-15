@@ -228,3 +228,54 @@ func TestMailboxExpiredRowsDoNotFillQuota(t *testing.T) {
 		t.Fatalf("unexpected message %s", msg.MessageID)
 	}
 }
+
+func TestClaimPendingByMessageID(t *testing.T) {
+	svc := setupMailboxTestDB(t)
+	targetID := "acp_agent_aabbccdd"
+	callerFP := "fedcba9876543210"
+
+	if _, err := svc.DepositInbound(DepositInboundParams{
+		TargetID:   targetID,
+		CallerFP:   callerFP,
+		MessageID:  "msg-a",
+		RequestID:  "req-a",
+		SessionID:  "sess-a",
+		Ciphertext: "YQ==",
+	}); err != nil {
+		t.Fatalf("deposit a: %v", err)
+	}
+	if _, err := svc.DepositInbound(DepositInboundParams{
+		TargetID:   targetID,
+		CallerFP:   callerFP,
+		MessageID:  "msg-b",
+		RequestID:  "req-b",
+		SessionID:  "sess-b",
+		Ciphertext: "Yg==",
+	}); err != nil {
+		t.Fatalf("deposit b: %v", err)
+	}
+
+	claimed, err := svc.ClaimPendingByMessageID(targetID, "msg-b")
+	if err != nil {
+		t.Fatalf("claim by id: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].MessageID != "msg-b" {
+		t.Fatalf("want msg-b, got %+v", claimed)
+	}
+
+	miss, err := svc.ClaimPendingByMessageID(targetID, "msg-missing")
+	if err != nil {
+		t.Fatalf("claim missing: %v", err)
+	}
+	if len(miss) != 0 {
+		t.Fatalf("missing should be empty, got %d", len(miss))
+	}
+
+	rest, err := svc.ClaimPending(targetID, 5)
+	if err != nil {
+		t.Fatalf("claim rest: %v", err)
+	}
+	if len(rest) != 1 || rest[0].MessageID != "msg-a" {
+		t.Fatalf("want remaining msg-a, got %+v", rest)
+	}
+}

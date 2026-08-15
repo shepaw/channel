@@ -56,8 +56,8 @@ func main() {
 	proxyHandler := handlers.NewProxyHandler(channelSvcV2.ChannelService, rateLimitSvc, channelSvcV2)
 	oauthHandler := handlers.NewOAuthHandler(authSvc, redisSvc, cfg)
 	agentSvc := services.NewAgentService(dbSvc)
-	agentHandler := handlers.NewAgentHandler(agentSvc, channelSvcV2.ChannelService, redisSvc, tunnelMgr)
 	accessSvc := services.NewAccessService(dbSvc, agentSvc)
+	agentHandler := handlers.NewAgentHandler(agentSvc, channelSvcV2.ChannelService, accessSvc, redisSvc, tunnelMgr)
 	mailboxSvc := services.NewMailboxService(dbSvc)
 	if err := mailboxSvc.BackfillTargetColumns(); err != nil {
 		log.Printf("⚠️  Mailbox target backfill: %v", err)
@@ -145,7 +145,7 @@ func main() {
 		api.GET("/discovery/agents", agentHandler.Discover)
 		api.GET("/discovery/agents/:agent_id", agentHandler.GetPublicCard)
 
-		// 调用端在线探测（免登录 + IP 限流；不暴露 endpoint）
+		// 已批准 caller 的在线探测（caller_fp；不暴露 endpoint）
 		api.GET("/agents/:agent_id/presence", agentHandler.Presence)
 
 		// 接入申请（caller 免登录+IP 限流；批准后才下发 endpoint）
@@ -197,9 +197,9 @@ func main() {
 				ch.POST("/:id/rate-limits", channelHandler.AddRateLimitRule)
 				ch.GET("/:id/rate-limits", channelHandler.GetRateLimitRules)
 				ch.DELETE("/:id/rate-limits/:rule_id", channelHandler.DeleteRateLimitRule)
-				ch.GET("/:id/secret", channelHandler.GetSecret)             // 查看 tunnel secret
-				ch.POST("/:id/rotate-secret", tunnelHandler.RotateSecret)  // 重置 tunnel secret
-				ch.GET("/:id/agents", agentHandler.ListByChannel)          // channel 下的 agent 列表
+				ch.GET("/:id/secret", channelHandler.GetSecret)           // 查看 tunnel secret
+				ch.POST("/:id/rotate-secret", tunnelHandler.RotateSecret) // 重置 tunnel secret
+				ch.GET("/:id/agents", agentHandler.ListByChannel)         // channel 下的 agent 列表
 			}
 		}
 	}

@@ -18,15 +18,15 @@ import (
 type TunnelMessageType string
 
 const (
-	TunnelMsgRequest   TunnelMessageType = "request"
-	TunnelMsgResponse  TunnelMessageType = "response"
-	TunnelMsgPing      TunnelMessageType = "ping"
-	TunnelMsgPong      TunnelMessageType = "pong"
-	TunnelMsgData      TunnelMessageType = "data"
-	TunnelMsgClose     TunnelMessageType = "close"
-	TunnelMsgWsConnect TunnelMessageType = "ws_connect" // server→agent: establish WS connection
-	TunnelMsgWsData    TunnelMessageType = "ws_data"    // bidirectional: transport WS frame data
-	TunnelMsgWsClose   TunnelMessageType = "ws_close"   // bidirectional: close WS connection
+	TunnelMsgRequest     TunnelMessageType = "request"
+	TunnelMsgResponse    TunnelMessageType = "response"
+	TunnelMsgPing        TunnelMessageType = "ping"
+	TunnelMsgPong        TunnelMessageType = "pong"
+	TunnelMsgData        TunnelMessageType = "data"
+	TunnelMsgClose       TunnelMessageType = "close"
+	TunnelMsgWsConnect   TunnelMessageType = "ws_connect"   // server→agent: establish WS connection
+	TunnelMsgWsData      TunnelMessageType = "ws_data"      // bidirectional: transport WS frame data
+	TunnelMsgWsClose     TunnelMessageType = "ws_close"     // bidirectional: close WS connection
 	TunnelMsgMailWaiting TunnelMessageType = "mail_waiting" // server→agent: mailbox has pending inbound
 	TunnelMsgAccessGrant TunnelMessageType = "access_grant" // server→agent: access grant changed, sync peers
 )
@@ -43,6 +43,12 @@ type TunnelMessage struct {
 	Error     string            `json:"error,omitempty"`
 	WsMsgType int               `json:"ws_msg_type,omitempty"` // websocket.TextMessage=1 / BinaryMessage=2
 	AgentID   string            `json:"agent_id,omitempty"`    // mail_waiting 等控制消息
+	// 收件箱控制面元信息（不含 ciphertext）。agent 先按 message_id 去重，再去 inbox 拉正文。
+	MessageID string `json:"message_id,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	CallerFP  string `json:"caller_fp,omitempty"`
+	Kind      string `json:"kind,omitempty"`
 }
 
 // TunnelConn 代表一个已连接的本地 agent（某台设备的一条隧道连接）

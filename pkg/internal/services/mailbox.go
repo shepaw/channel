@@ -107,6 +107,18 @@ func (s *MailboxService) DepositInbound(p DepositInboundParams) (*models.Mailbox
 
 // ClaimPending 原子领取最多 limit 条 pending inbound（含超时回收的 in_flight）。
 func (s *MailboxService) ClaimPending(targetID string, limit int) ([]models.MailboxMessage, error) {
+	return s.claimPending(targetID, limit, "")
+}
+
+// ClaimPendingByMessageID 领取指定 message_id 的 pending inbound（agent 收到元信息后按需拉正文）。
+func (s *MailboxService) ClaimPendingByMessageID(targetID, messageID string) ([]models.MailboxMessage, error) {
+	if strings.TrimSpace(messageID) == "" {
+		return nil, nil
+	}
+	return s.claimPending(targetID, 1, messageID)
+}
+
+func (s *MailboxService) claimPending(targetID string, limit int, messageID string) ([]models.MailboxMessage, error) {
 	if _, err := s.requireTarget("", targetID); err != nil {
 		return nil, err
 	}
@@ -121,15 +133,15 @@ func (s *MailboxService) ClaimPending(targetID string, limit int) ([]models.Mail
 
 	var claimed []models.MailboxMessage
 	err := s.db.DB.Transaction(func(tx *gorm.DB) error {
+		q := tx.Where(
+			"target_id = ? AND direction = ? AND status = ? AND deleted_at IS NULL AND expires_at > ?",
+			targetID, models.MailboxDirectionInbound, models.MailboxStatusPending, time.Now(),
+		)
+		if messageID != "" {
+			q = q.Where("message_id = ?", messageID)
+		}
 		var rows []models.MailboxMessage
-		if err := tx.
-			Where(
-				"target_id = ? AND direction = ? AND status = ? AND deleted_at IS NULL AND expires_at > ?",
-				targetID, models.MailboxDirectionInbound, models.MailboxStatusPending, time.Now(),
-			).
-			Order("created_at ASC").
-			Limit(limit).
-			Find(&rows).Error; err != nil {
+		if err := q.Order("created_at ASC").Limit(limit).Find(&rows).Error; err != nil {
 			return err
 		}
 		if len(rows) == 0 {
