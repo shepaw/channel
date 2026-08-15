@@ -68,7 +68,7 @@ func (c *ChannelService) CreateChannel(userID, name, description, channelType, t
 	}
 
 	channelID := uuid.New().String()
-	endpoint := generateEndpointSimple(channelType, c.config.BaseDomain, channelID)
+	endpoint := generateEndpointSimple(channelType, c.config.BaseURL, c.config.BaseDomain, channelID)
 
 	// tunnel 类型自动生成永久密钥
 	var secret string
@@ -361,18 +361,24 @@ func isValidChannelType(t string) bool {
 	return false
 }
 
+// publicSchemes 根据 BASE_URL 决定对外入口协议。
+// channel type（如 https）只描述后端目标，不决定对外 scheme。
+func publicSchemes(baseURL string) (httpScheme, wsScheme string) {
+	if strings.HasPrefix(strings.ToLower(baseURL), "https://") {
+		return "https", "wss"
+	}
+	return "http", "ws"
+}
+
 // generateEndpointSimple generates a stable endpoint URL for http/https/ws types.
 // TCP/UDP endpoints are assigned after port allocation (see ChannelServiceV2).
-func generateEndpointSimple(channelType, baseDomain, channelID string) string {
+func generateEndpointSimple(channelType, baseURL, baseDomain, channelID string) string {
+	httpScheme, wsScheme := publicSchemes(baseURL)
 	switch channelType {
-	case "http":
-		return fmt.Sprintf("http://%s/proxy/%s", baseDomain, channelID)
-	case "https":
-		return fmt.Sprintf("https://%s/proxy/%s", baseDomain, channelID)
-	case "ws":
-		return fmt.Sprintf("ws://%s/proxy/%s", baseDomain, channelID)
-	case "tunnel-http", "tunnel-ws":
-		return fmt.Sprintf("http://%s/proxy/%s", baseDomain, channelID)
+	case "http", "https", "tunnel-http":
+		return fmt.Sprintf("%s://%s/proxy/%s", httpScheme, baseDomain, channelID)
+	case "ws", "tunnel-ws":
+		return fmt.Sprintf("%s://%s/proxy/%s", wsScheme, baseDomain, channelID)
 	case "tunnel-tcp":
 		return fmt.Sprintf("tcp://%s/channel/%s", baseDomain, channelID)
 	case "tcp":
