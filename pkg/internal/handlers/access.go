@@ -210,6 +210,7 @@ func (h *AccessHandler) grantView(g *models.AgentAccessGrant, withConnect bool) 
 			view["agent_pubkey"] = agent.AgentPubKey
 			view["agent_name"] = agent.Name
 			view["channel_id"] = agent.ChannelID
+			view["online"] = services.AgentReachable(agent, h.tunnelMgr)
 		}
 	}
 	return view

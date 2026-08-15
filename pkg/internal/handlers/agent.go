@@ -14,6 +14,7 @@ import (
 
 // AgentHandler agent 注册中心接口：
 //   - POST /api/v1/agents/register              agent 侧上报（HMAC 签名，无需用户 token）
+//   - GET  /api/v1/agents/:agent_id/presence    调用端在线探测（免登录 + IP 限流）
 //   - GET  /api/v1/channels/:id/agents          owner 查看 channel 下的 agent 列表
 //   - PUT  /api/v1/agents/:agent_id             owner 更新名片 / 公开开关
 //   - DELETE /api/v1/agents/:agent_id           owner 注销 agent
@@ -23,14 +24,16 @@ type AgentHandler struct {
 	agentSvc   *services.AgentService
 	channelSvc *services.ChannelService
 	redis      *services.RedisService
+	tunnelMgr  *services.TunnelManager
 	nonces     *services.NonceCache
 }
 
-func NewAgentHandler(agentSvc *services.AgentService, channelSvc *services.ChannelService, redis *services.RedisService) *AgentHandler {
+func NewAgentHandler(agentSvc *services.AgentService, channelSvc *services.ChannelService, redis *services.RedisService, tunnelMgr *services.TunnelManager) *AgentHandler {
 	return &AgentHandler{
 		agentSvc:   agentSvc,
 		channelSvc: channelSvc,
 		redis:      redis,
+		tunnelMgr:  tunnelMgr,
 		nonces:     services.NewNonceCache(),
 	}
 }
@@ -48,14 +51,14 @@ type PublicAgentView struct {
 	Online      bool   `json:"online"`
 }
 
-func toPublicView(a models.Agent) PublicAgentView {
+func (h *AgentHandler) toPublicView(a models.Agent) PublicAgentView {
 	return PublicAgentView{
 		AgentID:     a.AgentID,
 		Name:        a.Name,
 		Description: a.Description,
 		AgentFP:     a.AgentFP,
 		Capacity:    a.Capacity,
-		Online:      a.Online(),
+		Online:      services.AgentReachable(&a, h.tunnelMgr),
 	}
 }
 
@@ -146,7 +149,7 @@ func (h *AgentHandler) Register(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"agent_id": agent.AgentID,
-		"online":   agent.Online(),
+		"online":   services.AgentReachable(agent, h.tunnelMgr),
 		"message":  "agent registered",
 	})
 }
@@ -196,7 +199,7 @@ func (h *AgentHandler) ListByChannel(c *gin.Context) {
 			Capacity:    a.Capacity,
 			ActiveCount: a.ActiveCount,
 			IsPublic:    a.IsPublic,
-			Online:      a.Online(),
+			Online:      services.AgentReachable(&a, h.tunnelMgr),
 			LastSeenAt:  a.LastSeenAt.Format("2006-01-02 15:04:05"),
 			CreatedAt:   a.CreatedAt.Format("2006-01-02 15:04:05"),
 		})
@@ -255,7 +258,35 @@ func (h *AgentHandler) Update(c *gin.Context) {
 		"description": agent.Description,
 		"is_public":   agent.IsPublic,
 		"capacity":    agent.Capacity,
-		"online":      agent.Online(),
+		"online":      services.AgentReachable(agent, h.tunnelMgr),
+	})
+}
+
+// Presence 调用端查询 agent 是否可通过 channel 到达。
+// GET /api/v1/agents/:agent_id/presence
+//
+// 不返回 endpoint / 公钥等连接材料；只回答在线。心跳窗口内且所在
+// channel 隧道存活才为 true。未知 agent 与离线统一返回 online=false，避免枚举。
+func (h *AgentHandler) Presence(c *gin.Context) {
+	if !h.allowDiscovery(c) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded, try again later"})
+		return
+	}
+
+	agentID := c.Param("agent_id")
+	agent, err := h.agentSvc.GetByID(agentID)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{
+			"agent_id": agentID,
+			"online":   false,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"agent_id":     agent.AgentID,
+		"online":       services.AgentReachable(agent, h.tunnelMgr),
+		"last_seen_at": agent.LastSeenAt.Format(time.RFC3339),
 	})
 }
 
@@ -307,7 +338,7 @@ func (h *AgentHandler) Discover(c *gin.Context) {
 
 	views := make([]PublicAgentView, 0, len(agents))
 	for _, a := range agents {
-		views = append(views, toPublicView(a))
+		views = append(views, h.toPublicView(a))
 	}
 
 	if page < 1 {
@@ -341,7 +372,7 @@ func (h *AgentHandler) GetPublicCard(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
 		return
 	}
-	c.JSON(http.StatusOK, toPublicView(*agent))
+	c.JSON(http.StatusOK, h.toPublicView(*agent))
 }
 
 // allowDiscovery IP 限流：每 IP 每分钟 discoveryRateLimit 次。

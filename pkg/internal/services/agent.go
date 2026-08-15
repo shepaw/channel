@@ -51,11 +51,12 @@ type RegisterAgentParams struct {
 	ActiveCount int
 }
 
-// Register 注册或刷新一个 agent（幂等）：
+// Register 注册或刷新一个 agent（幂等，兼作心跳）：
 //   - agent_id 不存在 → 新建，绑定 channel 及其 owner
-//   - agent_id 已存在且属于同一 channel → 更新可变字段并刷新 LastSeenAt（兼作心跳）
-//   - agent_id 已存在但属于其他 channel → ErrAgentChannelBound（不允许静默挪走，
-//     防止他人用自己的 channel 抢占别人的 agent 身份）
+//   - agent_id 已存在且属于同一 channel → 更新可变字段并刷新 LastSeenAt
+//   - agent_id 已存在、属于其他 channel，但新 channel 与原记录同一 owner
+//     → 改绑到新 channel 并刷新心跳（owner 换自己的隧道）
+//   - agent_id 已存在且新 channel 属于别人 → ErrAgentChannelBound
 func (s *AgentService) Register(p RegisterAgentParams) (*models.Agent, error) {
 	if !agentIDRegex.MatchString(p.AgentID) {
 		return nil, ErrInvalidAgentID
@@ -73,9 +74,11 @@ func (s *AgentService) Register(p RegisterAgentParams) (*models.Agent, error) {
 	err = s.db.DB.Where("agent_id = ? AND deleted_at IS NULL", p.AgentID).First(&agent).Error
 	switch {
 	case err == nil:
-		// 已存在：同 channel 刷新，异 channel 拒绝
 		if agent.ChannelID != p.ChannelID {
-			return nil, ErrAgentChannelBound
+			if agent.UserID != ownerID {
+				return nil, ErrAgentChannelBound
+			}
+			agent.ChannelID = p.ChannelID
 		}
 		if p.Name != "" {
 			agent.Name = p.Name
@@ -290,4 +293,16 @@ func (s *AgentService) channelOwnerID(channelID string) (string, error) {
 		return "", err
 	}
 	return uc.UserID, nil
+}
+
+// AgentReachable 调用端视角是否在线：心跳未过期，且所在 channel 隧道存活。
+// tunnelMgr 为 nil 时只看 LastSeenAt（测试或未注入隧道管理器）。
+func AgentReachable(a *models.Agent, tunnelMgr *TunnelManager) bool {
+	if a == nil || !a.Online() {
+		return false
+	}
+	if tunnelMgr == nil {
+		return true
+	}
+	return tunnelMgr.IsOnline(a.ChannelID)
 }

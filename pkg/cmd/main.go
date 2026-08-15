@@ -56,7 +56,7 @@ func main() {
 	proxyHandler := handlers.NewProxyHandler(channelSvcV2.ChannelService, rateLimitSvc, channelSvcV2)
 	oauthHandler := handlers.NewOAuthHandler(authSvc, redisSvc, cfg)
 	agentSvc := services.NewAgentService(dbSvc)
-	agentHandler := handlers.NewAgentHandler(agentSvc, channelSvcV2.ChannelService, redisSvc)
+	agentHandler := handlers.NewAgentHandler(agentSvc, channelSvcV2.ChannelService, redisSvc, tunnelMgr)
 	accessSvc := services.NewAccessService(dbSvc, agentSvc)
 	mailboxSvc := services.NewMailboxService(dbSvc)
 	if err := mailboxSvc.BackfillTargetColumns(); err != nil {
@@ -142,6 +142,9 @@ func main() {
 		// 公开目录（免登录，IP 限流）——只返回名片，不含 endpoint
 		api.GET("/discovery/agents", agentHandler.Discover)
 		api.GET("/discovery/agents/:agent_id", agentHandler.GetPublicCard)
+
+		// 调用端在线探测（免登录 + IP 限流；不暴露 endpoint）
+		api.GET("/agents/:agent_id/presence", agentHandler.Presence)
 
 		// 接入申请（caller 免登录+IP 限流；批准后才下发 endpoint）
 		api.POST("/access-requests", accessHandler.CreateRequest)
