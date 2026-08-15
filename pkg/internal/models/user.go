@@ -8,17 +8,17 @@ import (
 
 // User 用户表
 type User struct {
-	ID           string         `gorm:"primaryKey;type:varchar(36)" json:"id"`
-	Email        string         `gorm:"uniqueIndex;not null"        json:"email"`
-	Name         string         `json:"name"`
-	Avatar       string         `json:"avatar"`
-	Provider     string         `json:"provider"`    // wechat | google | email
-	ProviderID   string         `json:"provider_id"` // 第三方平台 openid/sub；email 注册时等同于 email
-	PasswordHash string         `gorm:"type:varchar(255)" json:"-"` // email 注册时存 bcrypt hash
-	EmailVerified bool          `gorm:"default:false" json:"email_verified"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
-	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`
+	ID            string         `gorm:"primaryKey;type:varchar(36)" json:"id"`
+	Email         string         `gorm:"uniqueIndex;not null"        json:"email"`
+	Name          string         `json:"name"`
+	Avatar        string         `json:"avatar"`
+	Provider      string         `json:"provider"`                   // wechat | google | github | email
+	ProviderID    string         `json:"provider_id"`                // 第三方平台 openid/sub/id；email 注册时等同于 email
+	PasswordHash  string         `gorm:"type:varchar(255)" json:"-"` // email 注册时存 bcrypt hash
+	EmailVerified bool           `gorm:"default:false" json:"email_verified"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	DeletedAt     gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 // EmailVerification 邮箱验证码表（注册 & 找回密码通用）

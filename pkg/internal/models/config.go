@@ -28,6 +28,10 @@ type Config struct {
 	GoogleClientID     string `json:"google_client_id"`
 	GoogleClientSecret string `json:"google_client_secret"`
 
+	// OAuth - GitHub
+	GitHubClientID     string `json:"github_client_id"`
+	GitHubClientSecret string `json:"github_client_secret"`
+
 	// SMTP 邮件（用于邮箱注册/登录验证码）
 	SMTPHost     string `json:"smtp_host"`
 	SMTPPort     int    `json:"smtp_port"`
@@ -42,7 +46,7 @@ type Config struct {
 	// AllowedOrigins 控制 CORS 允许的来源，例如 ["https://app.example.com"]
 	// 留空表示不允许任何跨域请求；设为 ["*"] 表示允许所有来源（不建议生产环境使用）
 	AllowedOrigins []string `json:"allowed_origins"`
-	
+
 	// AllowedDomains 控制允许的请求域名，例如 ["*.shepaw.com", "api.example.com"]
 	// 支持通配符 (*.example.com 匹配 sub.example.com)
 	// 留空表示接受所有域名；设为 ["*"] 表示显式允许所有域名

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,10 +40,12 @@ type WechatConfig struct {
 }
 
 type WechatQRCodeResponse struct {
-	SceneID    string `json:"scene_id"`
-	QRCodeURL  string `json:"qrcode_url"`
-	Ticket     string `json:"ticket"`
-	ExpireSeconds int `json:"expire_seconds"`
+	SceneID       string `json:"scene_id"`
+	QRCodeURL     string `json:"qrcode_url"`
+	AppID         string `json:"app_id,omitempty"`
+	RedirectURI   string `json:"redirect_uri,omitempty"`
+	Ticket        string `json:"ticket"`
+	ExpireSeconds int    `json:"expire_seconds"`
 }
 
 func (h *OAuthHandler) WechatQRCode(c *gin.Context) {
@@ -79,15 +82,17 @@ func (h *OAuthHandler) WechatQRCode(c *gin.Context) {
 	h.redis.Set(fmt.Sprintf("wechat:scene:%s", sceneID), "pending", 5*time.Minute)
 
 	// 构建微信扫码登录URL（使用微信开放平台扫码登录方案）
-	redirectURI := url.QueryEscape(fmt.Sprintf("%s/auth/wechat/callback", h.config.BaseURL))
+	redirectURI := fmt.Sprintf("%s/auth/wechat/callback", h.config.BaseURL)
 	qrcodeURL := fmt.Sprintf(
 		"https://open.weixin.qq.com/connect/qrconnect?appid=%s&redirect_uri=%s&response_type=code&scope=snsapi_login&state=%s",
-		appID, redirectURI, sceneID,
+		appID, url.QueryEscape(redirectURI), sceneID,
 	)
 
 	c.JSON(http.StatusOK, WechatQRCodeResponse{
 		SceneID:       sceneID,
 		QRCodeURL:     qrcodeURL,
+		AppID:         appID,
+		RedirectURI:   redirectURI,
 		ExpireSeconds: 300,
 	})
 }
@@ -143,10 +148,18 @@ func (h *OAuthHandler) WechatCallback(c *gin.Context) {
 		return
 	}
 
+	providerID := wechatUser.UnionID
+	if providerID == "" {
+		providerID = wechatUser.OpenID
+	}
+	if providerID == "" {
+		providerID = wechatToken.OpenID
+	}
+
 	// 创建或获取用户
 	user, err := h.authSvc.CreateOrGetUser(
 		"wechat",
-		wechatUser.UnionID,
+		providerID,
 		fmt.Sprintf("wx_%s@wechat.local", wechatUser.OpenID),
 		wechatUser.NickName,
 		wechatUser.HeadImgURL,
@@ -258,6 +271,102 @@ func (h *OAuthHandler) GoogleCallback(c *gin.Context) {
 	c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("/oauth-callback?token=%s", accessToken.Token))
 }
 
+// ===== GitHub OAuth =====
+
+func (h *OAuthHandler) GitHubInitiate(c *gin.Context) {
+	if os.Getenv("DEV_SKIP_AUTH") == "1" {
+		h.devLogin(c)
+		return
+	}
+
+	clientID := h.config.GitHubClientID
+	if clientID == "" {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "GitHub login not configured"})
+		return
+	}
+
+	state := uuid.New().String()
+	h.redis.Set(fmt.Sprintf("github:state:%s", state), "1", 10*time.Minute)
+
+	redirectURI := url.QueryEscape(fmt.Sprintf("%s/auth/github/callback", h.config.BaseURL))
+	authURL := fmt.Sprintf(
+		"https://github.com/login/oauth/authorize?client_id=%s&redirect_uri=%s&scope=read:user%%20user:email&state=%s",
+		clientID, redirectURI, state,
+	)
+
+	c.Redirect(http.StatusTemporaryRedirect, authURL)
+}
+
+func (h *OAuthHandler) GitHubCallback(c *gin.Context) {
+	code := c.Query("code")
+	state := c.Query("state")
+
+	if code == "" {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=no_code")
+		return
+	}
+
+	stateKey := fmt.Sprintf("github:state:%s", state)
+	if _, err := h.redis.Get(stateKey); err != nil {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=invalid_state")
+		return
+	}
+	h.redis.Delete(stateKey)
+
+	redirectURI := fmt.Sprintf("%s/auth/github/callback", h.config.BaseURL)
+	githubToken, err := exchangeGitHubCode(
+		h.config.GitHubClientID,
+		h.config.GitHubClientSecret,
+		redirectURI,
+		code,
+	)
+	if err != nil {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=github_exchange_failed")
+		return
+	}
+
+	githubUser, err := getGitHubUserInfo(githubToken.AccessToken)
+	if err != nil {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=github_userinfo_failed")
+		return
+	}
+
+	email := githubUser.Email
+	if email == "" {
+		if primary, err := getGitHubPrimaryEmail(githubToken.AccessToken); err == nil {
+			email = primary
+		}
+	}
+	if email == "" {
+		email = fmt.Sprintf("gh_%d@github.local", githubUser.ID)
+	}
+
+	name := githubUser.Name
+	if name == "" {
+		name = githubUser.Login
+	}
+
+	user, err := h.authSvc.CreateOrGetUser(
+		"github",
+		strconv.FormatInt(githubUser.ID, 10),
+		email,
+		name,
+		githubUser.AvatarURL,
+	)
+	if err != nil {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=user_creation_failed")
+		return
+	}
+
+	accessToken, err := h.authSvc.GenerateAccessToken(user.ID, h.config.TokenTTL)
+	if err != nil {
+		c.Redirect(http.StatusTemporaryRedirect, "/login?error=token_generation_failed")
+		return
+	}
+
+	c.Redirect(http.StatusTemporaryRedirect, fmt.Sprintf("/oauth-callback?token=%s", accessToken.Token))
+}
+
 // ===== Helper functions =====
 
 type WechatTokenResponse struct {
@@ -266,6 +375,8 @@ type WechatTokenResponse struct {
 	UnionID      string `json:"unionid"`
 	RefreshToken string `json:"refresh_token"`
 	ExpiresIn    int    `json:"expires_in"`
+	ErrCode      int    `json:"errcode"`
+	ErrMsg       string `json:"errmsg"`
 }
 
 type WechatUserInfo struct {
@@ -273,6 +384,8 @@ type WechatUserInfo struct {
 	NickName   string `json:"nickname"`
 	HeadImgURL string `json:"headimgurl"`
 	UnionID    string `json:"unionid"`
+	ErrCode    int    `json:"errcode"`
+	ErrMsg     string `json:"errmsg"`
 }
 
 func exchangeWechatCode(appID, appSecret, code string) (*WechatTokenResponse, error) {
@@ -290,6 +403,9 @@ func exchangeWechatCode(appID, appSecret, code string) (*WechatTokenResponse, er
 	var result WechatTokenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
+	}
+	if result.ErrCode != 0 || result.AccessToken == "" {
+		return nil, fmt.Errorf("wechat token: %d %s", result.ErrCode, result.ErrMsg)
 	}
 
 	return &result, nil
@@ -310,6 +426,9 @@ func getWechatUserInfo(accessToken, openID string) (*WechatUserInfo, error) {
 	var result WechatUserInfo
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
+	}
+	if result.ErrCode != 0 || result.OpenID == "" {
+		return nil, fmt.Errorf("wechat userinfo: %d %s", result.ErrCode, result.ErrMsg)
 	}
 
 	return &result, nil
@@ -376,6 +495,135 @@ func getGoogleUserInfo(accessToken string) (*GoogleUserInfo, error) {
 	}
 
 	return &result, nil
+}
+
+type GitHubTokenResponse struct {
+	AccessToken      string `json:"access_token"`
+	TokenType        string `json:"token_type"`
+	Scope            string `json:"scope"`
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description"`
+}
+
+type GitHubUserInfo struct {
+	ID        int64  `json:"id"`
+	Login     string `json:"login"`
+	Name      string `json:"name"`
+	Email     string `json:"email"`
+	AvatarURL string `json:"avatar_url"`
+}
+
+type gitHubEmail struct {
+	Email    string `json:"email"`
+	Primary  bool   `json:"primary"`
+	Verified bool   `json:"verified"`
+}
+
+func githubAPIRequest(method, apiURL, accessToken string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest(method, apiURL, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "channel-service")
+	if accessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+	}
+	return http.DefaultClient.Do(req)
+}
+
+func exchangeGitHubCode(clientID, clientSecret, redirectURI, code string) (*GitHubTokenResponse, error) {
+	params := url.Values{
+		"client_id":     {clientID},
+		"client_secret": {clientSecret},
+		"redirect_uri":  {redirectURI},
+		"code":          {code},
+	}
+
+	req, err := http.NewRequest(
+		"POST",
+		"https://github.com/login/oauth/access_token",
+		strings.NewReader(params.Encode()),
+	)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", "channel-service")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result GitHubTokenResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if result.Error != "" || result.AccessToken == "" {
+		return nil, fmt.Errorf("github token: %s %s", result.Error, result.ErrorDescription)
+	}
+
+	return &result, nil
+}
+
+func getGitHubUserInfo(accessToken string) (*GitHubUserInfo, error) {
+	resp, err := githubAPIRequest("GET", "https://api.github.com/user", accessToken, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("github userinfo: status %d", resp.StatusCode)
+	}
+
+	var result GitHubUserInfo
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	if result.ID == 0 {
+		return nil, fmt.Errorf("github userinfo: missing id")
+	}
+
+	return &result, nil
+}
+
+func getGitHubPrimaryEmail(accessToken string) (string, error) {
+	resp, err := githubAPIRequest("GET", "https://api.github.com/user/emails", accessToken, nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("github emails: status %d", resp.StatusCode)
+	}
+
+	var emails []gitHubEmail
+	if err := json.NewDecoder(resp.Body).Decode(&emails); err != nil {
+		return "", err
+	}
+
+	var fallback string
+	for _, e := range emails {
+		if e.Email == "" {
+			continue
+		}
+		if e.Primary && e.Verified {
+			return e.Email, nil
+		}
+		if fallback == "" && e.Verified {
+			fallback = e.Email
+		}
+	}
+	if fallback != "" {
+		return fallback, nil
+	}
+	if len(emails) > 0 && emails[0].Email != "" {
+		return emails[0].Email, nil
+	}
+	return "", fmt.Errorf("github emails: none")
 }
 
 // ===== Dev 模式辅助方法 =====

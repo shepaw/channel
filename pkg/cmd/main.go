@@ -111,6 +111,7 @@ func main() {
 	// OAuth 回调
 	r.GET("/auth/wechat/callback", oauthHandler.WechatCallback)
 	r.GET("/auth/google/callback", oauthHandler.GoogleCallback)
+	r.GET("/auth/github/callback", oauthHandler.GitHubCallback)
 
 	// API v1
 	api := r.Group("/api/v1")
@@ -122,6 +123,7 @@ func main() {
 			auth.GET("/wechat/qrcode", oauthHandler.WechatQRCode)
 			auth.GET("/wechat/status", oauthHandler.WechatStatus)
 			auth.GET("/google/initiate", oauthHandler.GoogleInitiate)
+			auth.GET("/github/initiate", oauthHandler.GitHubInitiate)
 
 			// 邮箱注册/登录
 			email := auth.Group("/email")
@@ -352,6 +354,8 @@ func loadConfig() *models.Config {
 	envStr("WECHAT_APP_SECRET", &cfg.WechatAppSecret)
 	envStr("GOOGLE_CLIENT_ID", &cfg.GoogleClientID)
 	envStr("GOOGLE_CLIENT_SECRET", &cfg.GoogleClientSecret)
+	envStr("GITHUB_CLIENT_ID", &cfg.GitHubClientID)
+	envStr("GITHUB_CLIENT_SECRET", &cfg.GitHubClientSecret)
 	envStr("SMTP_HOST", &cfg.SMTPHost)
 	envInt("SMTP_PORT", &cfg.SMTPPort)
 	envStr("SMTP_USERNAME", &cfg.SMTPUsername)
