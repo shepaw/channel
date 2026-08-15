@@ -181,3 +181,50 @@ func TestMailboxRejectsInvalidCallerFP(t *testing.T) {
 		t.Fatalf("want ErrMailboxInvalidFP got %v", err)
 	}
 }
+
+func TestMailboxExpiredRowsDoNotFillQuota(t *testing.T) {
+	svc := setupMailboxTestDB(t)
+	targetID := "acp_agent_aabbccdd"
+	callerFP := "fedcba9876543210"
+
+	expired := &models.MailboxMessage{
+		ID:         "expired-1",
+		TargetType: models.MailboxTargetAgent,
+		TargetID:   targetID,
+		AgentID:    targetID,
+		Direction:  models.MailboxDirectionInbound,
+		Status:     models.MailboxStatusPending,
+		Kind:       models.MailboxKindChat,
+		CallerFP:   callerFP,
+		MessageID:  "old-msg",
+		SessionID:  "sess-old",
+		Ciphertext: "dGVzdA==",
+		SizeBytes:  6,
+		ExpiresAt:  time.Now().Add(-time.Hour),
+	}
+	if err := svc.db.DB.Create(expired).Error; err != nil {
+		t.Fatalf("seed expired: %v", err)
+	}
+
+	n, err := svc.PurgeExpired()
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("purge want 1 got %d", n)
+	}
+
+	msg, err := svc.DepositInbound(DepositInboundParams{
+		TargetID:   targetID,
+		CallerFP:   callerFP,
+		MessageID:  "msg-fresh",
+		SessionID:  "sess-fresh",
+		Ciphertext: "dGVzdA==",
+	})
+	if err != nil {
+		t.Fatalf("deposit after purge: %v", err)
+	}
+	if msg.MessageID != "msg-fresh" {
+		t.Fatalf("unexpected message %s", msg.MessageID)
+	}
+}

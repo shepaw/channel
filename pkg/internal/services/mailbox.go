@@ -403,9 +403,12 @@ func isGroupTargetID(id string) bool {
 }
 
 func (s *MailboxService) ensureQuota(targetID string) error {
+	if _, err := s.purgeExpiredForTarget(targetID); err != nil {
+		return err
+	}
 	var n int64
 	if err := s.db.DB.Model(&models.MailboxMessage{}).
-		Where("target_id = ? AND deleted_at IS NULL", targetID).
+		Where("target_id = ? AND deleted_at IS NULL AND expires_at > ?", targetID, time.Now()).
 		Count(&n).Error; err != nil {
 		return err
 	}
@@ -413,6 +416,18 @@ func (s *MailboxService) ensureQuota(targetID string) error {
 		return ErrMailboxFull
 	}
 	return nil
+}
+
+func (s *MailboxService) purgeExpiredForTarget(targetID string) (int64, error) {
+	res := s.db.DB.Where("target_id = ? AND expires_at < ?", targetID, time.Now()).
+		Delete(&models.MailboxMessage{})
+	return res.RowsAffected, res.Error
+}
+
+// PurgeExpired 软删除全局过期行，使配额口径与可见窗口一致。
+func (s *MailboxService) PurgeExpired() (int64, error) {
+	res := s.db.DB.Where("expires_at < ?", time.Now()).Delete(&models.MailboxMessage{})
+	return res.RowsAffected, res.Error
 }
 
 func (s *MailboxService) recoverTimedOut(targetID string) {

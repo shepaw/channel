@@ -69,6 +69,19 @@ func main() {
 	tunnelHandler.SetAgentService(agentSvc) // 握手时连接即注册
 	appVersionHandler := handlers.NewAppVersionHandler(appVersionSvc, "uploads/versions", cfg.BaseURL)
 
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			n, err := mailboxSvc.PurgeExpired()
+			if err != nil {
+				log.Printf("⚠️  Mailbox purge: %v", err)
+			} else if n > 0 {
+				log.Printf("🧹 Mailbox purged %d expired rows", n)
+			}
+		}
+	}()
+
 	// 注入 TunnelManager 到 ProxyHandler
 	proxyHandler.SetTunnelManager(tunnelMgr)
 
